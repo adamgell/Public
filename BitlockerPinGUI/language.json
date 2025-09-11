@@ -1,0 +1,34 @@
+{
+    "en-US": {
+        "characters": "characters",
+        "numbers": "numbers",
+        "choosePin": "Choose a Password that's {0}-20 {1} long.\nThe password can be alphanumeric.",
+        "PinIsNotEqualNotLongEnough": "Password is not long enough",
+        "PinIsNotEqualOnlyNumbers": "Only numbers allowed",
+        "PinIsNotEqualSettingNow": "Setting valid Password now...",
+        "PinIsNotEqual": "Password is not equal",
+        "PinIsTooSimple": "Password is too simple",
+        "BitLockerStartupPIN": "BitLocker startup Password",
+        "RetypePIN": "Re-type Password",
+        "NewPIN": "New Password",
+        "buttonCancel": "&Cancel",
+        "buttonSetPin": "&Set Password",
+        "labelSetBLStartupPin": "Set BitLocker startup Password"
+    },
+    "de-DE": {
+        "characters": "Zeichen",
+        "numbers": "Nummern",
+        "choosePin": "Wähle eine PIN die {0}-20 {1} lang ist.",
+        "PinIsNotEqualNotLongEnough": "PIN ist nicht lang genug",
+        "PinIsNotEqualOnlyNumbers": "Nur Nummern erlaubt",
+        "PinIsNotEqualSettingNow": "Setze valide PIN...",
+        "PinIsNotEqual": "PIN ist nicht gleich",
+        "PinIsTooSimple": "PIN ist zu einfach",
+        "BitLockerStartupPIN": "BitLocker start PIN",
+        "RetypePIN": "Wiederhole PIN",
+        "NewPIN": "Neue PIN",
+        "buttonCancel": "&Abbruch",
+        "buttonSetPin": "&Setze PIN",
+        "labelSetBLStartupPin": "Setze BitLocker start PIN"
+    }
+}
