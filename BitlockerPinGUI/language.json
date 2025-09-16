@@ -5,15 +5,15 @@
         "choosePin": "Choose a Password that's {0}-20 {1} long.\nThe password can be alphanumeric.",
         "PinIsNotEqualNotLongEnough": "Password is not long enough",
         "PinIsNotEqualOnlyNumbers": "Only numbers allowed",
-        "PinIsNotEqualSettingNow": "Setting valid Password now...",
+        "PinIsNotEqualSettingNow": "Setting valid password now...",
         "PinIsNotEqual": "Password is not equal",
         "PinIsTooSimple": "Password is too simple",
-        "BitLockerStartupPIN": "BitLocker startup Password",
-        "RetypePIN": "Re-type Password",
-        "NewPIN": "New Password",
+        "BitLockerStartupPIN": "BitLocker startup password",
+        "RetypePIN": "Re-type password",
+        "NewPIN": "New password",
         "buttonCancel": "&Cancel",
-        "buttonSetPin": "&Set Password",
-        "labelSetBLStartupPin": "Set BitLocker startup Password"
+        "buttonSetPin": "&Set password",
+        "labelSetBLStartupPin": "Set BitLocker startup password"
     },
     "de-DE": {
         "characters": "Zeichen",
