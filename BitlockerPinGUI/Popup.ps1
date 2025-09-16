@@ -1760,7 +1760,7 @@ $formBitLockerStartupPIN.add_Load($formBitLockerStartupPIN_Load)
 # labelPINIsNotEqual
 $labelPINIsNotEqual.AutoSize = $True
 $labelPINIsNotEqual.ForeColor = 'Red'
-$labelPINIsNotEqual.Location = '275, 181'
+$labelPINIsNotEqual.Location = '100, 181'
 $labelPINIsNotEqual.Margin = '4, 0, 4, 0'
 $labelPINIsNotEqual.Name = 'labelPINIsNotEqual'
 $labelPINIsNotEqual.Size = '105, 21'
