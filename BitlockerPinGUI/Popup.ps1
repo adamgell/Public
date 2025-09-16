@@ -104,8 +104,8 @@ $formBitLockerStartupPIN_Load = {
 	if ($global:EnhancedPIN -eq 1) {
 		$characters = $language.$uiLang.characters #"characters"
 	}
-	if ($global:MinimumPIN -isnot [int] -or $global:MinimumPIN -lt 4) {
-		$global:MinimumPIN = 6
+	if ($global:MinimumPIN -isnot [int] -or $global:MinimumPIN -lt 8) {
+		$global:MinimumPIN = 8
 	}
 	$labelChoosePin.Text = $language.$uiLang.choosePin -f $global:MinimumPIN, $characters #"Choose a PIN that's $global:MinimumPIN-20 $characters long."
 }
@@ -1796,14 +1796,14 @@ $labelChoosePin.Margin = '4, 25, 4, 0'
 $labelChoosePin.Name = 'labelChoosePin'
 $labelChoosePin.Size = '256, 21'
 $labelChoosePin.TabIndex = 6
-$labelChoosePin.Text = 'Choose a PIN that''s 6-20 numbers long.'
+$labelChoosePin.Text = 'Choose a PIN that''s 8-20 numbers long.'
 $labelChoosePin.UseCompatibleTextRendering = $True
 
 # panelBottom
 $panelBottom.Controls.Add($buttonCancel)
 $panelBottom.Controls.Add($buttonSetPIN)
 $panelBottom.BackColor = 'Control'
-$panelBottom.Location = '-1, 209'
+$panelBottom.Location = '-1, 210'
 $panelBottom.Margin = '4, 4, 4, 4'
 $panelBottom.Name = 'panelBottom'
 $panelBottom.Size = '448, 63'
@@ -1821,10 +1821,10 @@ $buttonCancel.UseVisualStyleBackColor = $True
 $buttonCancel.add_Click($buttonCancel_Click)
 
 # buttonSetPIN
-$buttonSetPIN.Location = '190, 17'
+$buttonSetPIN.Location = '195, 17'
 $buttonSetPIN.Margin = '4, 4, 4, 4'
 $buttonSetPIN.Name = 'buttonSetPIN'
-$buttonSetPIN.Size = '150, 30'
+$buttonSetPIN.Size = '140, 30'
 $buttonSetPIN.TabIndex = 3
 $buttonSetPIN.Text = $language.$uiLang.buttonSetPin #'&Set PIN'
 $buttonSetPIN.UseCompatibleTextRendering = $True
