@@ -2,6 +2,13 @@
 
 A simple PowerShell GUI tool to set or change the BitLocker PIN on Windows devices.
 
+## Usage
+
+### Install
+```powershell -ex bypass -file SetBitLockerPin.ps1```
+
+### Uninstall
+```powershell -ex bypass -file SetBitLockerPin.ps1```
 
 ## Requirements
 
