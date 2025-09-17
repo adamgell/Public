@@ -9,7 +9,7 @@ if ($hasTpmPin -and (Test-Path -Path $logFile)) {
 }
 elseif ($hasTpmPin) {
     Write-Output "TPM PIN protector is present, but log file does not exist."
-    exit 1
+    exit 0
 }
 elseif (Test-Path -Path $logFile) {
     Write-Output "Log file exists at $logFile, but TPM PIN protector is not present."
