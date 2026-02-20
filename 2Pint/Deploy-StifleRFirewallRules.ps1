@@ -54,7 +54,7 @@ param(
     [switch]$RemoveExisting
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 $RuleGroup = 'StifleR'
 
 #region Helper Functions
@@ -64,8 +64,8 @@ function New-StifleRFirewallRule {
         [Parameter(Mandatory)][string]$DisplayName,
         [Parameter(Mandatory)][ValidateSet('Inbound', 'Outbound')][string]$Direction,
         [Parameter(Mandatory)][ValidateSet('TCP', 'UDP')][string]$Protocol,
-        [string]$LocalPort = 'Any',
-        [string]$RemotePort = 'Any',
+        [string[]]$LocalPort = @('Any'),
+        [string[]]$RemotePort = @('Any'),
         [string]$LocalAddress = 'Any',
         [string]$RemoteAddress = 'Any',
         [string]$Program = 'Any',
@@ -92,15 +92,21 @@ function New-StifleRFirewallRule {
         Description  = $Description
     }
 
-    if ($LocalPort -ne 'Any')      { $params.LocalPort    = $LocalPort }
-    if ($RemotePort -ne 'Any')     { $params.RemotePort   = $RemotePort }
+    # Only add non-default values — compare as single string for 'Any' default
+    if (($LocalPort.Count -gt 1) -or ($LocalPort[0] -ne 'Any'))    { $params.LocalPort    = $LocalPort }
+    if (($RemotePort.Count -gt 1) -or ($RemotePort[0] -ne 'Any'))  { $params.RemotePort   = $RemotePort }
     if ($LocalAddress -ne 'Any')   { $params.LocalAddress = $LocalAddress }
     if ($RemoteAddress -ne 'Any')  { $params.RemoteAddress = $RemoteAddress }
     if ($Program -ne 'Any')        { $params.Program      = $Program }
 
     if ($PSCmdlet.ShouldProcess($ruleName, 'Create firewall rule')) {
-        New-NetFirewallRule @params | Out-Null
-        Write-Host "  [+] Created: $ruleName" -ForegroundColor Green
+        try {
+            New-NetFirewallRule @params | Out-Null
+            Write-Host "  [+] Created: $ruleName" -ForegroundColor Green
+        }
+        catch {
+            Write-Warning "Failed to create rule '$ruleName': $($_.Exception.Message)"
+        }
     }
 }
 #endregion
@@ -168,7 +174,7 @@ if ('Client' -in $resolvedComponents) {
     New-StifleRFirewallRule `
         -DisplayName 'Client - Green Leader Peer Data (In)' `
         -Direction Inbound -Protocol TCP `
-        -LocalPort '1337,1339' `
+        -LocalPort @('1337','1339') `
         -Program $blueGreenExe `
         -Description 'Green Leader receiving peer data'
 
@@ -244,7 +250,7 @@ if ('Client' -in $resolvedComponents) {
     New-StifleRFirewallRule `
         -DisplayName 'Client - Green Leader Peer Data (Out)' `
         -Direction Outbound -Protocol TCP `
-        -RemotePort '1337,1339' `
+        -RemotePort @('1337','1339') `
         -Program $blueGreenExe `
         -Description 'Green Leader outbound peer data'
 
@@ -354,7 +360,7 @@ if ('BranchCache' -in $resolvedComponents) {
     New-StifleRFirewallRule `
         -DisplayName 'BranchCache - Hosted Cache Server HTTP (In)' `
         -Direction Inbound -Protocol TCP `
-        -LocalPort '1339,443' `
+        -LocalPort @('1339','443') `
         -Description 'BranchCache Hosted Cache Server HTTP inbound'
 
     New-StifleRFirewallRule `
@@ -377,13 +383,13 @@ if ('BranchCache' -in $resolvedComponents) {
     New-StifleRFirewallRule `
         -DisplayName 'BranchCache - Hosted Cache Client HTTP (Out)' `
         -Direction Outbound -Protocol TCP `
-        -RemotePort '1339,443' `
+        -RemotePort @('1339','443') `
         -Description 'BranchCache Hosted Cache Client HTTP outbound'
 
     New-StifleRFirewallRule `
         -DisplayName 'BranchCache - Hosted Cache Server HTTP (Out)' `
         -Direction Outbound -Protocol TCP `
-        -LocalPort '1339,443' `
+        -LocalPort @('1339','443') `
         -Description 'BranchCache Hosted Cache Server HTTP outbound'
 
     New-StifleRFirewallRule `
