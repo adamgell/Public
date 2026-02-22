@@ -667,3 +667,8 @@ if (-not $script:ForceInstall) {
     Write-Host "Run 'Reset-PowerShellEnvironment' to reinstall all components" -ForegroundColor DarkGray
 }
 #endregion
+
+# Sync GitHub MCP server token from gh CLI
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+    $env:GITHUB_PERSONAL_ACCESS_TOKEN = (gh auth token 2>$null)
+}
