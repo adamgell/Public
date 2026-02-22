@@ -156,7 +156,7 @@ if ($IsMacOS) {
     # Check for Homebrew and install packages
     if (Get-Command brew -ErrorAction SilentlyContinue) {
         $brewPackages = @(
-            @{Name = 'neofetch'; Description = 'System information tool'},
+            @{Name = 'fastfetch'; Description = 'System information tool'},
             @{Name = 'git'; Description = 'Version control system'},
             @{Name = 'oh-my-posh'; Description = 'Prompt theme engine'},
             @{Name = 'curl'; Description = 'Data transfer tool'},
@@ -187,7 +187,7 @@ elseif ($IsWindows) {
     # Windows package management with winget
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         $wingetPackages = @(
-            @{Id = 'Neofetch.Neofetch'; Name = 'Neofetch'},
+            @{Id = 'Fastfetch-cli.Fastfetch'; Name = 'fastfatch'},
             @{Id = 'Git.Git'; Name = 'Git'},
             @{Id = 'JanDeDobbeleer.OhMyPosh'; Name = 'Oh-My-Posh'},
             @{Id = 'Microsoft.PowerShell'; Name = 'PowerShell 7+'},
@@ -256,10 +256,10 @@ if (Get-Command oh-my-posh -ErrorAction SilentlyContinue) {
 }
 #endregion
 
-#region Neofetch Display
-if (Get-Command neofetch -ErrorAction SilentlyContinue) {
+#region fastfatch Display
+if (Get-Command fastfatch -ErrorAction SilentlyContinue) {
     if (-not $script:ForceInstall) {  # Don't show during reset
-        neofetch
+        fastfatch
     }
 } elseif ($IsMacOS -and (Get-Command screenfetch -ErrorAction SilentlyContinue)) {
     # Alternative for macOS
