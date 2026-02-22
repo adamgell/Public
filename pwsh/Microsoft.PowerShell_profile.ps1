@@ -190,7 +190,8 @@ elseif ($IsWindows) {
             @{Id = 'Neofetch.Neofetch'; Name = 'Neofetch'},
             @{Id = 'Git.Git'; Name = 'Git'},
             @{Id = 'JanDeDobbeleer.OhMyPosh'; Name = 'Oh-My-Posh'},
-            @{Id = 'Microsoft.PowerShell'; Name = 'PowerShell 7+'}
+            @{Id = 'Microsoft.PowerShell'; Name = 'PowerShell 7+'},
+            @{Id = 'Microsoft.Edit'; Name = 'Microsoft Edit'}
         )
         
         Write-Host "`nChecking Windows packages..." -ForegroundColor Cyan
@@ -407,11 +408,11 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     function Initialize-GitConfig {
         Write-Host "Configuring Git..." -ForegroundColor Cyan
         
-        # Set nano as default editor
+        # Set edit as default editor
         $currentEditor = git config --global core.editor
-        if ($currentEditor -ne 'nano') {
-            Write-Host "  Setting nano as default git editor..." -ForegroundColor Yellow
-            git config --global core.editor nano
+        if ($currentEditor -ne 'edit --wait') {
+            Write-Host "  Setting edit as default git editor..." -ForegroundColor Yellow
+            git config --global core.editor "edit --wait"
         }
         
         # Check if user name and email are set
