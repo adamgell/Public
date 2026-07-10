@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="1440" viewBox="0 0 1120 1440" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect x="0" y="0" width="1120" height="1440" fill="#ffffff"/>
+
+  <!-- title -->
+  <text x="560" y="52" text-anchor="middle" font-size="31" font-weight="700" fill="#0f172a">BitLocker Encryption Upgrade &#8212; 128-bit to 256-bit</text>
+  <text x="560" y="84" text-anchor="middle" font-size="17" fill="#475569">How affected devices are identified and automatically re-encrypted</text>
+
+  <!-- ============ PHASE 1 BAND ============ -->
+  <rect x="25" y="106" width="1070" height="546" rx="18" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <rect x="48" y="123" width="250" height="40" rx="20" fill="#1d4ed8"/>
+  <text x="173" y="149" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff" letter-spacing="1">PHASE 1 &#183; ASSESS</text>
+
+  <!-- N1 -->
+  <rect x="295" y="186" width="470" height="74" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="530" y="219" text-anchor="middle" font-size="17" fill="#0f172a">Intune Proactive Remediation checks</text>
+  <text x="530" y="243" text-anchor="middle" font-size="17" fill="#0f172a">each device's OS-drive encryption cipher</text>
+  <line x1="530" y1="260" x2="530" y2="300" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- N2 decision -->
+  <polygon points="530,302 668,361 530,420 392,361" fill="#fffbeb" stroke="#b45309" stroke-width="2"/>
+  <text x="530" y="356" text-anchor="middle" font-size="16" font-weight="600" fill="#78350f">OS drive already</text>
+  <text x="530" y="378" text-anchor="middle" font-size="16" font-weight="600" fill="#78350f">XtsAes256 (256-bit)?</text>
+
+  <!-- Yes -> compliant -->
+  <line x1="668" y1="361" x2="812" y2="361" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="740" y="351" text-anchor="middle" font-size="14" font-weight="700" fill="#15803d">Yes</text>
+  <rect x="815" y="329" width="262" height="64" rx="12" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="946" y="356" text-anchor="middle" font-size="17" font-weight="700" fill="#14532d">Compliant &#10003;</text>
+  <text x="946" y="378" text-anchor="middle" font-size="15" fill="#166534">no action needed</text>
+
+  <!-- No -> flagged -->
+  <line x1="530" y1="420" x2="530" y2="472" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="545" y="450" text-anchor="start" font-size="14" font-weight="700" fill="#b91c1c">No &#8212; 128-bit / weak cipher</text>
+
+  <!-- N3 flagged -->
+  <rect x="295" y="472" width="470" height="62" rx="12" fill="#fde68a" stroke="#d97706" stroke-width="1.5"/>
+  <text x="530" y="509" text-anchor="middle" font-size="17" font-weight="600" fill="#7c2d12">Reported non-compliant in the Intune report</text>
+  <line x1="530" y1="534" x2="530" y2="568" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- N4 group -->
+  <rect x="295" y="568" width="470" height="66" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="530" y="596" text-anchor="middle" font-size="17" fill="#0f172a">Customer reviews report and adds flagged</text>
+  <text x="530" y="620" text-anchor="middle" font-size="17" fill="#0f172a">devices to the remediation device group</text>
+
+  <!-- crossover arrow -->
+  <line x1="530" y1="634" x2="530" y2="784" stroke="#475569" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <rect x="548" y="670" width="452" height="30" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="562" y="690" text-anchor="start" font-size="15" font-weight="600" fill="#334155">Group membership triggers the Win32 app deployment</text>
+
+  <!-- ============ PHASE 2 BAND ============ -->
+  <rect x="25" y="702" width="1070" height="712" rx="18" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1.5"/>
+  <rect x="48" y="719" width="372" height="40" rx="20" fill="#0f766e"/>
+  <text x="234" y="745" text-anchor="middle" font-size="16" font-weight="700" fill="#ffffff" letter-spacing="1">PHASE 2 &#183; REMEDIATE (AUTOMATED)</text>
+
+  <!-- N5 -->
+  <rect x="295" y="784" width="470" height="74" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="530" y="817" text-anchor="middle" font-size="17" fill="#0f172a">Win32 app deploys and runs safety checks</text>
+  <text x="530" y="841" text-anchor="middle" font-size="17" fill="#0f172a">(AC power, free disk space, not a hardware SED)</text>
+  <line x1="530" y1="858" x2="530" y2="896" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- N6 decision -->
+  <polygon points="530,898 682,958 530,1018 378,958" fill="#fffbeb" stroke="#b45309" stroke-width="2"/>
+  <text x="530" y="952" text-anchor="middle" font-size="16" font-weight="600" fill="#78350f">Correct 256-bit policy</text>
+  <text x="530" y="974" text-anchor="middle" font-size="16" font-weight="600" fill="#78350f">delivered by Intune?</text>
+
+  <!-- No -> abort -->
+  <line x1="682" y1="958" x2="812" y2="958" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="742" y="948" text-anchor="middle" font-size="14" font-weight="700" fill="#b91c1c">No</text>
+  <rect x="815" y="926" width="262" height="64" rx="12" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="946" y="953" text-anchor="middle" font-size="16" font-weight="700" fill="#7f1d1d">Abort safely</text>
+  <text x="946" y="975" text-anchor="middle" font-size="15" fill="#991b1b">drive is never decrypted</text>
+
+  <!-- Yes down -->
+  <line x1="530" y1="1018" x2="530" y2="1058" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="545" y="1044" text-anchor="start" font-size="14" font-weight="700" fill="#15803d">Yes</text>
+
+  <!-- N7 -->
+  <rect x="295" y="1058" width="470" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="530" y="1093" text-anchor="middle" font-size="17" fill="#0f172a">Remove 128-bit encryption (decrypt drive)</text>
+  <line x1="530" y1="1116" x2="530" y2="1146" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- N8 -->
+  <rect x="295" y="1146" width="470" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="530" y="1181" text-anchor="middle" font-size="17" fill="#0f172a">Re-encrypt full disk to XtsAes256 (256-bit)</text>
+  <line x1="530" y1="1204" x2="530" y2="1234" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- N9 -->
+  <rect x="295" y="1234" width="470" height="58" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="530" y="1269" text-anchor="middle" font-size="17" fill="#0f172a">Back up new recovery key to Entra ID</text>
+  <line x1="530" y1="1292" x2="530" y2="1322" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- N10 complete -->
+  <rect x="295" y="1322" width="470" height="72" rx="12" fill="#dcfce7" stroke="#16a34a" stroke-width="2.5"/>
+  <text x="530" y="1353" text-anchor="middle" font-size="19" font-weight="700" fill="#14532d">Complete &#10003;</text>
+  <text x="530" y="1377" text-anchor="middle" font-size="15" fill="#166534">device now fully 256-bit compliant</text>
+</svg>

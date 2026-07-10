@@ -1,0 +1,389 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Shared helpers and state machine for the BitLocker XtsAes256 cipher upgrade Win32 app.
+.DESCRIPTION
+    Dot-source this file. All Windows-only operations (BitLocker, TPM, registry,
+    scheduled tasks) are isolated in thin wrapper functions so the decision logic
+    is unit-testable on any OS.
+#>
+
+# ---------------------------------------------------------------------------
+# Compliance
+# ---------------------------------------------------------------------------
+function Test-IsXtsAes256 {
+    param([string]$Method)
+    $Method -eq 'XtsAes256'
+}
+
+function Get-CipherComplianceState {
+    param([string]$Method)
+    if ($Method -eq 'XtsAes256') { return 'Compliant' }
+    if ([string]::IsNullOrWhiteSpace($Method) -or $Method -eq 'None') { return 'OutOfScope' }
+    'NonCompliant'
+}
+
+# ---------------------------------------------------------------------------
+# Secret handling (recovery password is only ever compared/stored as a hash)
+# ---------------------------------------------------------------------------
+function Get-RecoveryPasswordHash {
+    param([Parameter(Mandatory)][string]$RecoveryPassword)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($RecoveryPassword)
+        ($sha256.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Working directory, state, logging
+# ---------------------------------------------------------------------------
+function Get-CipherWorkingDir {
+    if ($env:CIPHER_WORKDIR_OVERRIDE) { return $env:CIPHER_WORKDIR_OVERRIDE }
+    Join-Path $env:ProgramData 'BitLockerCipherRemediation'
+}
+
+function Get-CipherStatePath {
+    Join-Path (Get-CipherWorkingDir) 'state.json'
+}
+
+function New-CipherState {
+    param([string]$MountPoint = 'C:', [string]$NowUtc)
+    if ([string]::IsNullOrWhiteSpace($NowUtc)) {
+        $NowUtc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    [pscustomobject]@{
+        Phase          = 'Init'
+        MountPoint     = $MountPoint
+        AttemptCount   = 0
+        FirstSeenUtc   = $NowUtc
+        LastUpdatedUtc = $NowUtc
+        LastMessage    = 'Initialized'
+        AbortReason    = $null
+    }
+}
+
+function Read-CipherState {
+    $path = Get-CipherStatePath
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { $null }
+}
+
+function Write-CipherState {
+    param([Parameter(Mandatory)]$State)
+    $dir = Get-CipherWorkingDir
+    $null = New-Item -ItemType Directory -Path $dir -Force
+    $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Get-CipherStatePath) -Encoding utf8
+}
+
+function Write-CipherLog {
+    param([Parameter(Mandatory)][string]$Message)
+    $dir = Get-CipherWorkingDir
+    $null = New-Item -ItemType Directory -Path $dir -Force
+    $line = '[{0}] {1}' -f (Get-Date).ToUniversalTime().ToString('o'), $Message
+    Add-Content -LiteralPath (Join-Path $dir 'remediation.log') -Value $line
+}
+
+# ---------------------------------------------------------------------------
+# Environment wrappers (Windows-only cmdlets isolated here)
+# ---------------------------------------------------------------------------
+function Get-BLCipherStatus {
+    param([string]$MountPoint = 'C:')
+    $v = Get-BitLockerVolume -MountPoint $MountPoint
+    [pscustomobject]@{
+        MountPoint           = $MountPoint
+        Method               = [string]$v.EncryptionMethod
+        VolumeStatus         = [string]$v.VolumeStatus
+        ProtectionStatus     = [string]$v.ProtectionStatus
+        EncryptionPercentage = [int]$v.EncryptionPercentage
+        KeyProtector         = $v.KeyProtector
+    }
+}
+
+function Get-FveOsEncryptionMethod {
+    try {
+        $val = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\FVE' -Name 'EncryptionMethodWithXtsOs' -ErrorAction Stop
+        [int]$val.EncryptionMethodWithXtsOs
+    }
+    catch { $null }
+}
+
+function Test-BLOnAcPower {
+    try {
+        $bs = Get-CimInstance -Namespace 'root\wmi' -ClassName 'BatteryStatus' -ErrorAction Stop
+        if (-not $bs) { return $true }          # no battery => desktop/VM => on AC
+        [bool](@($bs)[0].PowerOnline)
+    }
+    catch { $true }                              # battery class unavailable => treat as AC
+}
+
+function Get-BLFreeSpaceGb {
+    param([string]$MountPoint = 'C:')
+    $driveLetter = $MountPoint.TrimEnd(':', '\')
+    $vol = Get-Volume -DriveLetter $driveLetter -ErrorAction Stop
+    [math]::Round($vol.SizeRemaining / 1GB, 2)
+}
+
+function Test-BLTpmReady {
+    try {
+        $tpm = Get-Tpm -ErrorAction Stop
+        [bool]($tpm.TpmPresent -and $tpm.TpmReady)
+    }
+    catch { $false }
+}
+
+# ---------------------------------------------------------------------------
+# Guardrails (order: hard fails first, then transient waits)
+# ---------------------------------------------------------------------------
+function Get-CipherGuardrailStatus {
+    param(
+        [Parameter(Mandatory)]$CipherStatus,
+        [double]$MinFreeGb = 10
+    )
+    if ($CipherStatus.Method -eq 'Hardware') {
+        return [pscustomobject]@{ Ok=$false; Hard=$true;  Reason='Hardware self-encrypting drive is not supported' }
+    }
+    if (-not (Test-BLTpmReady)) {
+        return [pscustomobject]@{ Ok=$false; Hard=$true;  Reason='TPM is not present or not ready' }
+    }
+    if (-not (Test-BLOnAcPower)) {
+        return [pscustomobject]@{ Ok=$false; Hard=$false; Reason='Device is on battery power' }
+    }
+    if ((Get-BLFreeSpaceGb -MountPoint $CipherStatus.MountPoint) -lt $MinFreeGb) {
+        return [pscustomobject]@{ Ok=$false; Hard=$false; Reason="Less than $MinFreeGb GB free" }
+    }
+    [pscustomobject]@{ Ok=$true; Hard=$false; Reason='All guardrails passed' }
+}
+
+# ---------------------------------------------------------------------------
+# BitLocker actions
+# ---------------------------------------------------------------------------
+function Invoke-BLDecrypt {
+    param([string]$MountPoint = 'C:')
+    Disable-BitLocker -MountPoint $MountPoint -ErrorAction Stop | Out-Null
+}
+
+function Invoke-BLEncryptXtsAes256 {
+    param([string]$MountPoint = 'C:')
+    # Enable-BitLocker requires a protector parameter set; -TpmProtector both starts
+    # encryption and creates the TPM protector needed for unattended boot. Full disk
+    # (no -UsedSpaceOnly). The recovery-password protector is added separately.
+    Enable-BitLocker -MountPoint $MountPoint -EncryptionMethod XtsAes256 -SkipHardwareTest -TpmProtector -ErrorAction Stop | Out-Null
+}
+
+function Test-BLHasProtectorType {
+    param($KeyProtector, [string]$Type)
+    @($KeyProtector | Where-Object { $_.KeyProtectorType -eq $Type }).Count -gt 0
+}
+
+function Add-BLTpmProtectorIfMissing {
+    param([string]$MountPoint = 'C:')
+    $status = Get-BLCipherStatus -MountPoint $MountPoint
+    if (-not (Test-BLHasProtectorType -KeyProtector $status.KeyProtector -Type 'Tpm')) {
+        Add-BitLockerKeyProtector -MountPoint $MountPoint -TpmProtector -ErrorAction Stop | Out-Null
+    }
+}
+
+function Add-BLRecoveryProtector {
+    param([string]$MountPoint = 'C:')
+    Add-BitLockerKeyProtector -MountPoint $MountPoint -RecoveryPasswordProtector -ErrorAction Stop | Out-Null
+}
+
+function Get-BLRecoveryProtectors {
+    param([Parameter(Mandatory)]$KeyProtector)
+    @(
+        $KeyProtector | Where-Object {
+            $_.KeyProtectorType -eq 'RecoveryPassword' -and
+            -not [string]::IsNullOrWhiteSpace($_.KeyProtectorId) -and
+            -not [string]::IsNullOrWhiteSpace($_.RecoveryPassword)
+        }
+    )
+}
+
+# ---------------------------------------------------------------------------
+# AAD escrow marker (mirrors the existing recovery-key-backup scheme)
+# ---------------------------------------------------------------------------
+function Get-CipherMarkerPath {
+    param([string]$MountPoint = 'C:')
+    $safe = ($MountPoint -replace '[^a-zA-Z0-9]', '').ToUpperInvariant()
+    if ([string]::IsNullOrWhiteSpace($safe)) { $safe = 'Volume' }
+    Join-Path (Get-CipherWorkingDir) "$safe.marker.json"
+}
+
+function Read-CipherMarker {
+    param([string]$MountPoint = 'C:')
+    $path = Get-CipherMarkerPath -MountPoint $MountPoint
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { $null }
+}
+
+function Write-CipherMarker {
+    param(
+        [Parameter(Mandatory)][object[]]$Protectors,
+        [string]$MountPoint = 'C:',
+        [string]$NowUtc
+    )
+    if ([string]::IsNullOrWhiteSpace($NowUtc)) { $NowUtc = (Get-Date).ToUniversalTime().ToString('o') }
+    $path = Get-CipherMarkerPath -MountPoint $MountPoint
+    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force
+    $records = @(
+        foreach ($p in $Protectors) {
+            [pscustomobject]@{
+                KeyProtectorId       = $p.KeyProtectorId
+                RecoveryPasswordHash = Get-RecoveryPasswordHash -RecoveryPassword $p.RecoveryPassword
+                BackedUpAtUtc        = $NowUtc
+            }
+        }
+    )
+    [pscustomobject]@{ MountPoint=$MountPoint; ProtectorBackups=$records; UpdatedAtUtc=$NowUtc } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding utf8
+}
+
+function Test-RecoveryProtectorBackedUp {
+    param([Parameter(Mandatory)]$Protector, $Marker)
+    if ($null -eq $Marker -or $null -eq $Marker.ProtectorBackups) { return $false }
+    $hash = Get-RecoveryPasswordHash -RecoveryPassword $Protector.RecoveryPassword
+    @(
+        $Marker.ProtectorBackups | Where-Object {
+            $_.KeyProtectorId -eq $Protector.KeyProtectorId -and $_.RecoveryPasswordHash -eq $hash
+        }
+    ).Count -gt 0
+}
+
+function Test-AllRecoveryProtectorsBackedUp {
+    param([Parameter(Mandatory)][object[]]$Protectors, [string]$MountPoint = 'C:')
+    $marker = Read-CipherMarker -MountPoint $MountPoint
+    foreach ($p in $Protectors) {
+        if (-not (Test-RecoveryProtectorBackedUp -Protector $p -Marker $marker)) { return $false }
+    }
+    $true
+}
+
+function Backup-BLRecoveryProtectorToAad {
+    param(
+        [Parameter(Mandatory)][object[]]$Protectors,
+        [string]$MountPoint = 'C:',
+        [string]$NowUtc
+    )
+    foreach ($p in $Protectors) {
+        BackupToAAD-BitLockerKeyProtector -MountPoint $MountPoint -KeyProtectorId $p.KeyProtectorId -ErrorAction Stop
+    }
+    Write-CipherMarker -Protectors $Protectors -MountPoint $MountPoint -NowUtc $NowUtc
+}
+
+# ---------------------------------------------------------------------------
+# State machine
+# ---------------------------------------------------------------------------
+function Get-CipherStateAgeDays {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$NowUtc)
+    ([datetime]$NowUtc - [datetime]$State.FirstSeenUtc).TotalDays
+}
+
+function Set-CipherPhase {
+    param(
+        [Parameter(Mandatory)]$State,
+        [Parameter(Mandatory)][string]$Phase,
+        [string]$Message,
+        [Parameter(Mandatory)][string]$NowUtc,
+        [string]$AbortReason
+    )
+    $State.Phase = $Phase
+    if ($PSBoundParameters.ContainsKey('Message'))     { $State.LastMessage = $Message }
+    if ($PSBoundParameters.ContainsKey('AbortReason')) { $State.AbortReason = $AbortReason }
+    $State.LastUpdatedUtc = $NowUtc
+    Write-CipherLog -Message "[$Phase] $($State.LastMessage)"
+    $State
+}
+
+function Unregister-CipherScheduledTask {
+    param([string]$TaskName = 'BitLockerCipherRemediation')
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+}
+
+function Invoke-CipherRemediationStep {
+    param(
+        [Parameter(Mandatory)]$State,
+        [string]$NowUtc,
+        [double]$MinFreeGb  = 10,
+        [double]$MaxAgeDays = 7
+    )
+    if ([string]::IsNullOrWhiteSpace($NowUtc)) { $NowUtc = (Get-Date).ToUniversalTime().ToString('o') }
+    $mount  = $State.MountPoint
+    $status = Get-BLCipherStatus -MountPoint $mount
+
+    switch ($State.Phase) {
+        'Init' {
+            $guard = Get-CipherGuardrailStatus -CipherStatus $status -MinFreeGb $MinFreeGb
+            if ($guard.Ok)   { return Set-CipherPhase -State $State -Phase 'VerifyPolicy' -Message 'Guardrails passed' -NowUtc $NowUtc }
+            if ($guard.Hard) { return Set-CipherPhase -State $State -Phase 'Aborted' -Message $guard.Reason -AbortReason $guard.Reason -NowUtc $NowUtc }
+            if ((Get-CipherStateAgeDays -State $State -NowUtc $NowUtc) -ge $MaxAgeDays) {
+                return Set-CipherPhase -State $State -Phase 'Aborted' -Message "Gave up after $MaxAgeDays days: $($guard.Reason)" -AbortReason $guard.Reason -NowUtc $NowUtc
+            }
+            return Set-CipherPhase -State $State -Phase 'Init' -Message "Waiting: $($guard.Reason)" -NowUtc $NowUtc
+        }
+        'VerifyPolicy' {
+            if ((Get-FveOsEncryptionMethod) -eq 7) {
+                return Set-CipherPhase -State $State -Phase 'Decrypt' -Message 'Intune policy XtsAes256 confirmed' -NowUtc $NowUtc
+            }
+            if ((Get-CipherStateAgeDays -State $State -NowUtc $NowUtc) -ge $MaxAgeDays) {
+                return Set-CipherPhase -State $State -Phase 'Aborted' -Message "Gave up after $MaxAgeDays days waiting for XtsAes256 policy" -AbortReason 'XtsAes256 policy not delivered' -NowUtc $NowUtc
+            }
+            return Set-CipherPhase -State $State -Phase 'VerifyPolicy' -Message 'Waiting for XtsAes256 policy to land' -NowUtc $NowUtc
+        }
+        'Decrypt' {
+            if ($status.Method -eq 'XtsAes256' -and $status.VolumeStatus -eq 'FullyEncrypted') {
+                return Set-CipherPhase -State $State -Phase 'Encrypt' -Message 'Already XtsAes256; ensuring protectors/escrow' -NowUtc $NowUtc
+            }
+            if ($status.VolumeStatus -eq 'FullyDecrypted' -or $status.Method -eq 'None') {
+                return Set-CipherPhase -State $State -Phase 'Encrypt' -Message 'Volume fully decrypted' -NowUtc $NowUtc
+            }
+            if ($status.VolumeStatus -ne 'DecryptionInProgress') {
+                # Re-assert the policy gate immediately before the FIRST Disable-BitLocker:
+                # the XtsAes256 policy may have been rolled back during the wait since
+                # VerifyPolicy. Never decrypt while policy != 7. (Only re-checked BEFORE
+                # decryption starts; once DecryptionInProgress we must let it finish —
+                # aborting mid-decrypt would leave the drive worse off.)
+                if ((Get-FveOsEncryptionMethod) -ne 7) {
+                    return Set-CipherPhase -State $State -Phase 'VerifyPolicy' -Message 'XtsAes256 policy no longer present before decrypt; returning to VerifyPolicy' -NowUtc $NowUtc
+                }
+                Invoke-BLDecrypt -MountPoint $mount
+                return Set-CipherPhase -State $State -Phase 'Decrypt' -Message 'Started decryption' -NowUtc $NowUtc
+            }
+            return Set-CipherPhase -State $State -Phase 'Decrypt' -Message "Decrypting ($($status.EncryptionPercentage)%)" -NowUtc $NowUtc
+        }
+        'Encrypt' {
+            if ($status.Method -ne 'XtsAes256' -and $status.VolumeStatus -eq 'FullyDecrypted') {
+                # Enable-BitLocker -TpmProtector creates the TPM protector AND starts encryption.
+                Invoke-BLEncryptXtsAes256 -MountPoint $mount
+                Add-BLRecoveryProtector -MountPoint $mount
+                return Set-CipherPhase -State $State -Phase 'BackupKey' -Message 'Started XtsAes256 full-disk encryption' -NowUtc $NowUtc
+            }
+            # Already XtsAes256 / mid-encryption: make sure both protectors exist (do not re-run Enable).
+            Add-BLTpmProtectorIfMissing -MountPoint $mount
+            if ((Get-BLRecoveryProtectors -KeyProtector $status.KeyProtector).Count -eq 0) {
+                Add-BLRecoveryProtector -MountPoint $mount
+            }
+            return Set-CipherPhase -State $State -Phase 'BackupKey' -Message 'Ensured protectors' -NowUtc $NowUtc
+        }
+        'BackupKey' {
+            $recovery = Get-BLRecoveryProtectors -KeyProtector $status.KeyProtector
+            if ($recovery.Count -eq 0) {
+                return Set-CipherPhase -State $State -Phase 'Encrypt' -Message 'No recovery protector yet; returning to Encrypt' -NowUtc $NowUtc
+            }
+            if (-not (Test-AllRecoveryProtectorsBackedUp -Protectors $recovery -MountPoint $mount)) {
+                Backup-BLRecoveryProtectorToAad -Protectors $recovery -MountPoint $mount -NowUtc $NowUtc
+            }
+            if ($status.Method -eq 'XtsAes256' -and $status.VolumeStatus -eq 'FullyEncrypted' -and $status.ProtectionStatus -eq 'On') {
+                Unregister-CipherScheduledTask
+                return Set-CipherPhase -State $State -Phase 'Done' -Message 'Device fully XtsAes256 compliant; recovery key escrowed' -NowUtc $NowUtc
+            }
+            return Set-CipherPhase -State $State -Phase 'BackupKey' -Message "Key escrowed; waiting for full encryption ($($status.EncryptionPercentage)%)" -NowUtc $NowUtc
+        }
+        'Done'    { return $State }
+        'Aborted' { return $State }
+        default   { return Set-CipherPhase -State $State -Phase 'Aborted' -Message "Unknown phase '$($State.Phase)'" -AbortReason 'Unknown phase' -NowUtc $NowUtc }
+    }
+}
