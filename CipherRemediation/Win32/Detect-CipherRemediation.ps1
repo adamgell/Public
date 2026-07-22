@@ -3,9 +3,10 @@
 .SYNOPSIS
     Win32 app detection rule: "installed" only when the device is fully upgraded to XtsAes256.
 .DESCRIPTION
-    Detected (exit 0 + stdout) requires: EncryptionMethod XtsAes256, VolumeStatus
-    FullyEncrypted, ProtectionStatus On, and the recovery key escrowed to Entra.
-    Any intermediate state exits 1 (not detected) so Intune keeps re-evaluating.
+    Detected (exit 0 + stdout) requires: XtsAes256 cipher, 100% encrypted,
+    ProtectionStatus On, and the recovery key escrowed to Entra. Checks are
+    representation-robust (enum name or integer). Any intermediate state exits 1
+    (not detected) so Intune keeps re-evaluating.
 #>
 $ErrorActionPreference = 'Stop'
 
@@ -31,9 +32,12 @@ try {
     $status = Get-BLCipherStatus -MountPoint 'C:'
     $recovery = Get-BLRecoveryProtectors -KeyProtector $status.KeyProtector
 
-    $done = $status.Method -eq 'XtsAes256' -and
-            $status.VolumeStatus -eq 'FullyEncrypted' -and
-            $status.ProtectionStatus -eq 'On' -and
+    # Representation-robust: Get-BitLockerVolume enums can surface as names or as
+    # integer strings depending on the OS/module build, so key "fully encrypted" off
+    # the unambiguous EncryptionPercentage and accept either form for cipher/protection.
+    $done = (([string]$status.Method) -in @('XtsAes256', '7')) -and
+            (([int]$status.EncryptionPercentage) -ge 100) -and
+            (([string]$status.ProtectionStatus) -in @('On', '1')) -and
             $recovery.Count -gt 0 -and
             (Test-AllRecoveryProtectorsBackedUp -Protectors $recovery -MountPoint 'C:')
 

@@ -103,6 +103,20 @@ function Get-BLCipherStatus {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Representation-robust state predicates.
+# Get-BitLockerVolume enum properties can surface as names ('FullyEncrypted',
+# 'On', 'XtsAes256') OR as their integer values ('1', '1', '7') depending on the
+# OS/BitLocker-module build. And a policy-managed drive reports
+# EncryptionMethod=XtsAes256 even while fully decrypted at 0%. So decide
+# encryption progress from the unambiguous EncryptionPercentage, and accept
+# either representation for the cipher/protection enums.
+# ---------------------------------------------------------------------------
+function Test-BLIsXtsAes256      { param($Status) ([string]$Status.Method) -in @('XtsAes256', '7') }
+function Test-BLIsProtectionOn   { param($Status) ([string]$Status.ProtectionStatus) -in @('On', '1') }
+function Test-BLIsFullyEncrypted { param($Status) ([int]$Status.EncryptionPercentage) -ge 100 }
+function Test-BLIsFullyDecrypted { param($Status) ([int]$Status.EncryptionPercentage) -le 0 }
+
 function Get-FveOsEncryptionMethod {
     try {
         $val = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\FVE' -Name 'EncryptionMethodWithXtsOs' -ErrorAction Stop
@@ -171,7 +185,15 @@ function Invoke-BLEncryptXtsAes256 {
     # Enable-BitLocker requires a protector parameter set; -TpmProtector both starts
     # encryption and creates the TPM protector needed for unattended boot. Full disk
     # (no -UsedSpaceOnly). The recovery-password protector is added separately.
-    Enable-BitLocker -MountPoint $MountPoint -EncryptionMethod XtsAes256 -SkipHardwareTest -TpmProtector -ErrorAction Stop | Out-Null
+    try {
+        Enable-BitLocker -MountPoint $MountPoint -EncryptionMethod XtsAes256 -SkipHardwareTest -TpmProtector -ErrorAction Stop | Out-Null
+    }
+    catch {
+        # The volume is already provisioned/armed (method + protectors set but the
+        # conversion never ran or is paused) — Enable-BitLocker throws. Resume the
+        # stalled conversion instead of failing so encryption actually starts.
+        Resume-BitLocker -MountPoint $MountPoint -ErrorAction SilentlyContinue | Out-Null
+    }
 }
 
 function Test-BLHasProtectorType {
@@ -189,7 +211,14 @@ function Add-BLTpmProtectorIfMissing {
 
 function Add-BLRecoveryProtector {
     param([string]$MountPoint = 'C:')
-    Add-BitLockerKeyProtector -MountPoint $MountPoint -RecoveryPasswordProtector -ErrorAction Stop | Out-Null
+    # Idempotent: only add a recovery-password protector if the volume has none.
+    # Adding duplicates would break escrow verification (the marker records one
+    # protector, but Test-AllRecoveryProtectorsBackedUp requires ALL current ones
+    # to be recorded), which would stall detection.
+    $status = Get-BLCipherStatus -MountPoint $MountPoint
+    if ((Get-BLRecoveryProtectors -KeyProtector $status.KeyProtector).Count -eq 0) {
+        Add-BitLockerKeyProtector -MountPoint $MountPoint -RecoveryPasswordProtector -ErrorAction Stop | Out-Null
+    }
 }
 
 function Get-BLRecoveryProtectors {
@@ -334,10 +363,10 @@ function Invoke-CipherRemediationStep {
             return Set-CipherPhase -State $State -Phase 'VerifyPolicy' -Message 'Waiting for XtsAes256 policy to land' -NowUtc $NowUtc
         }
         'Decrypt' {
-            if ($status.Method -eq 'XtsAes256' -and $status.VolumeStatus -eq 'FullyEncrypted') {
+            if ((Test-BLIsXtsAes256 -Status $status) -and (Test-BLIsFullyEncrypted -Status $status)) {
                 return Set-CipherPhase -State $State -Phase 'Encrypt' -Message 'Already XtsAes256; ensuring protectors/escrow' -NowUtc $NowUtc
             }
-            if ($status.VolumeStatus -eq 'FullyDecrypted' -or $status.Method -eq 'None') {
+            if (Test-BLIsFullyDecrypted -Status $status) {
                 return Set-CipherPhase -State $State -Phase 'Encrypt' -Message 'Volume fully decrypted' -NowUtc $NowUtc
             }
             if ($status.VolumeStatus -ne 'DecryptionInProgress') {
@@ -355,8 +384,12 @@ function Invoke-CipherRemediationStep {
             return Set-CipherPhase -State $State -Phase 'Decrypt' -Message "Decrypting ($($status.EncryptionPercentage)%)" -NowUtc $NowUtc
         }
         'Encrypt' {
-            if ($status.Method -ne 'XtsAes256' -and $status.VolumeStatus -eq 'FullyDecrypted') {
-                # Enable-BitLocker -TpmProtector creates the TPM protector AND starts encryption.
+            if (Test-BLIsFullyDecrypted -Status $status) {
+                # Drive is decrypted (0%) — START the XtsAes256 conversion. Do NOT gate on
+                # $status.Method: a policy-managed drive reports Method=XtsAes256 even while
+                # fully decrypted, which previously skipped Enable-BitLocker entirely and
+                # left the drive "armed but never converting". Invoke-BLEncryptXtsAes256
+                # falls back to Resume-BitLocker when the volume is already armed.
                 Invoke-BLEncryptXtsAes256 -MountPoint $mount
                 Add-BLRecoveryProtector -MountPoint $mount
                 return Set-CipherPhase -State $State -Phase 'BackupKey' -Message 'Started XtsAes256 full-disk encryption' -NowUtc $NowUtc
@@ -376,7 +409,7 @@ function Invoke-CipherRemediationStep {
             if (-not (Test-AllRecoveryProtectorsBackedUp -Protectors $recovery -MountPoint $mount)) {
                 Backup-BLRecoveryProtectorToAad -Protectors $recovery -MountPoint $mount -NowUtc $NowUtc
             }
-            if ($status.Method -eq 'XtsAes256' -and $status.VolumeStatus -eq 'FullyEncrypted' -and $status.ProtectionStatus -eq 'On') {
+            if ((Test-BLIsXtsAes256 -Status $status) -and (Test-BLIsFullyEncrypted -Status $status) -and (Test-BLIsProtectionOn -Status $status)) {
                 Unregister-CipherScheduledTask
                 return Set-CipherPhase -State $State -Phase 'Done' -Message 'Device fully XtsAes256 compliant; recovery key escrowed' -NowUtc $NowUtc
             }

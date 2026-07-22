@@ -307,6 +307,20 @@ Describe 'Step engine: Decrypt and Encrypt' {
         $r.Phase | Should -Be 'BackupKey'
     }
 
+    It 'Encrypt starts encryption when the drive is decrypted but reports Method=XtsAes256 (policy-armed, 0%)' {
+        # Regression (device DESKTOP-UR90I8C): a policy-managed drive reports
+        # EncryptionMethod=XtsAes256 even while FullyDecrypted at 0%. The old fresh-path
+        # guard `Method -ne 'XtsAes256'` was false here, so Enable-BitLocker was never
+        # called and encryption never started. Must key off encryption state, not Method.
+        function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='XtsAes256'
+            VolumeStatus='FullyDecrypted'; ProtectionStatus='Off'; EncryptionPercentage=0
+            KeyProtector=@([pscustomobject]@{ KeyProtectorType='RecoveryPassword'; KeyProtectorId='{AAA}'; RecoveryPassword='p' }) } }
+        $s = New-CipherState -NowUtc $now; $s.Phase='Encrypt'
+        $r = Invoke-CipherRemediationStep -State $s -NowUtc $now
+        $script:encryptCalled | Should -Be 1      # encryption MUST be started
+        $r.Phase | Should -Be 'BackupKey'
+    }
+
     It 'Encrypt (resuming, protectors missing) ensures TPM + recovery without re-running Enable' {
         function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='XtsAes256'
             VolumeStatus='EncryptionInProgress'; ProtectionStatus='On'; EncryptionPercentage=30; KeyProtector=@() } }
@@ -345,6 +359,20 @@ Describe 'Step engine: BackupKey and Done' {
     It 'reaches Done and unregisters the task when fully encrypted, protected, and escrowed' {
         function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='XtsAes256'
             VolumeStatus='FullyEncrypted'; ProtectionStatus='On'; EncryptionPercentage=100
+            KeyProtector=@([pscustomobject]@{ KeyProtectorType='RecoveryPassword'; KeyProtectorId='{AAA}'; RecoveryPassword='111111-222222-333333-444444-555555-666666-777777-888888' }) } }
+        $s = New-CipherState -NowUtc $now; $s.Phase='BackupKey'
+        $r = Invoke-CipherRemediationStep -State $s -NowUtc $now
+        $r.Phase | Should -Be 'Done'
+        $script:unregistered | Should -Be 1
+    }
+
+    It 'reaches Done at 100% even when the status enums stringify to integers' {
+        # Regression: Get-BitLockerVolume enums can surface as integer strings on some
+        # OS/module builds ("1" not "FullyEncrypted", "1" not "On", "7" not "XtsAes256").
+        # The completion gate is percentage-based + representation-robust, so it still
+        # recognizes a fully-encrypted, protected 256-bit drive as Done.
+        function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='7'
+            VolumeStatus='1'; ProtectionStatus='1'; EncryptionPercentage=100
             KeyProtector=@([pscustomobject]@{ KeyProtectorType='RecoveryPassword'; KeyProtectorId='{AAA}'; RecoveryPassword='111111-222222-333333-444444-555555-666666-777777-888888' }) } }
         $s = New-CipherState -NowUtc $now; $s.Phase='BackupKey'
         $r = Invoke-CipherRemediationStep -State $s -NowUtc $now
