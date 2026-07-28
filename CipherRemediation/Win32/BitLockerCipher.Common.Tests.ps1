@@ -380,6 +380,19 @@ Describe 'Step engine: BackupKey and Done' {
         $script:unregistered | Should -Be 1
     }
 
+    It 'returns to Encrypt from BackupKey when the drive is decrypted (stalled encryption recovery)' {
+        # Regression (DESKTOP-UR90I8C): worker got stuck in BackupKey with the drive
+        # fully decrypted at 0% (encryption never actually started). BackupKey must send
+        # it back to Encrypt to restart, not loop "waiting for full encryption" forever.
+        function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='XtsAes256'
+            VolumeStatus='FullyDecrypted'; ProtectionStatus='Off'; EncryptionPercentage=0
+            KeyProtector=@([pscustomobject]@{ KeyProtectorType='RecoveryPassword'; KeyProtectorId='{AAA}'; RecoveryPassword='111111-222222-333333-444444-555555-666666-777777-888888' }) } }
+        $s = New-CipherState -NowUtc $now; $s.Phase='BackupKey'
+        $r = Invoke-CipherRemediationStep -State $s -NowUtc $now
+        $r.Phase | Should -Be 'Encrypt'
+        $script:unregistered | Should -Be 0
+    }
+
     It 'falls back to Encrypt when no recovery protector exists yet' {
         function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='XtsAes256'
             VolumeStatus='EncryptionInProgress'; ProtectionStatus='On'; EncryptionPercentage=10; KeyProtector=@() } }

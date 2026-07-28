@@ -38,7 +38,10 @@ try {
     $workerPath = Join-Path $workDir 'Invoke-CipherRemediationWorker.ps1'
     $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$workerPath`""
     $atStart = New-ScheduledTaskTrigger -AtStartup
-    $repeat  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)
+    # -RepetitionDuration is required: without it the 15-min repetition stops firing
+    # after its (build-dependent) default window, which is why a stuck device went
+    # weeks without the worker running. MaxValue = repeat indefinitely.
+    $repeat  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration ([TimeSpan]::MaxValue)
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($atStart, $repeat) -Principal $principal -Settings $settings -Force | Out-Null

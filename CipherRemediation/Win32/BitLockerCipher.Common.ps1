@@ -406,6 +406,12 @@ function Invoke-CipherRemediationStep {
             if ($recovery.Count -eq 0) {
                 return Set-CipherPhase -State $State -Phase 'Encrypt' -Message 'No recovery protector yet; returning to Encrypt' -NowUtc $NowUtc
             }
+            if (Test-BLIsFullyDecrypted -Status $status) {
+                # Encryption stalled or reverted (drive is fully decrypted while in BackupKey)
+                # — return to Encrypt to (re)start it rather than waiting forever for an
+                # encryption that isn't running.
+                return Set-CipherPhase -State $State -Phase 'Encrypt' -Message 'Drive is decrypted; restarting encryption' -NowUtc $NowUtc
+            }
             if (-not (Test-AllRecoveryProtectorsBackedUp -Protectors $recovery -MountPoint $mount)) {
                 Backup-BLRecoveryProtectorToAad -Protectors $recovery -MountPoint $mount -NowUtc $NowUtc
             }
