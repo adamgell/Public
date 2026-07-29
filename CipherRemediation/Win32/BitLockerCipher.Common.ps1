@@ -141,12 +141,28 @@ function Get-BLFreeSpaceGb {
     [math]::Round($vol.SizeRemaining / 1GB, 2)
 }
 
-function Test-BLTpmReady {
+function Get-BLTpmState {
+    # Returns 'Ready' | 'NotReady' | 'Absent'.
+    # Get-Tpm can fail with 0x80284005 ("output buffer too small") on some virtual
+    # TPMs even when the TPM is present and ready, so query the Win32_Tpm WMI class
+    # first and fall back to Get-Tpm. An ambiguous/erroring query returns 'NotReady'
+    # (a transient state the guardrail waits on) rather than 'Absent', so a flaky TPM
+    # query never permanently aborts a device that actually has a TPM.
     try {
-        $tpm = Get-Tpm -ErrorAction Stop
-        [bool]($tpm.TpmPresent -and $tpm.TpmReady)
+        $tpm = Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction Stop
+        if ($tpm) {
+            if ($tpm.IsEnabled_InitialValue -and $tpm.IsActivated_InitialValue) { return 'Ready' }
+            return 'NotReady'
+        }
     }
-    catch { $false }
+    catch { }
+    try {
+        $g = Get-Tpm -ErrorAction Stop
+        if (-not $g.TpmPresent) { return 'Absent' }
+        if ($g.TpmReady) { return 'Ready' }
+        return 'NotReady'
+    }
+    catch { return 'NotReady' }
 }
 
 # ---------------------------------------------------------------------------
@@ -160,8 +176,14 @@ function Get-CipherGuardrailStatus {
     if ($CipherStatus.Method -eq 'Hardware') {
         return [pscustomobject]@{ Ok=$false; Hard=$true;  Reason='Hardware self-encrypting drive is not supported' }
     }
-    if (-not (Test-BLTpmReady)) {
-        return [pscustomobject]@{ Ok=$false; Hard=$true;  Reason='TPM is not present or not ready' }
+    $tpmState = Get-BLTpmState
+    if ($tpmState -eq 'Absent') {
+        return [pscustomobject]@{ Ok=$false; Hard=$true;  Reason='No TPM present' }
+    }
+    if ($tpmState -eq 'NotReady') {
+        # Transient: a TPM can be present but still initializing (e.g. right after
+        # provisioning), or the query was flaky. Wait and retry instead of aborting.
+        return [pscustomobject]@{ Ok=$false; Hard=$false; Reason='TPM present but not ready yet (waiting)' }
     }
     if (-not (Test-BLOnAcPower)) {
         return [pscustomobject]@{ Ok=$false; Hard=$false; Reason='Device is on battery power' }

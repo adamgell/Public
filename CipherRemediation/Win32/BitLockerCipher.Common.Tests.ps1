@@ -87,16 +87,26 @@ Describe 'Environment wrappers' {
         Test-BLOnAcPower | Should -BeFalse
     }
 
-    It 'reports TPM ready only when present and ready' {
-        function Get-Tpm { [pscustomobject]@{ TpmPresent=$true; TpmReady=$true } }
-        Test-BLTpmReady | Should -BeTrue
-        function Get-Tpm { [pscustomobject]@{ TpmPresent=$true; TpmReady=$false } }
-        Test-BLTpmReady | Should -BeFalse
+    It 'reports Ready from Win32_Tpm when enabled and activated' {
+        function Get-CimInstance { param($Namespace,$ClassName) [pscustomobject]@{ IsEnabled_InitialValue=$true; IsActivated_InitialValue=$true } }
+        Get-BLTpmState | Should -Be 'Ready'
     }
 
-    It 'reports TPM not ready when Get-Tpm throws' {
-        function Get-Tpm { throw 'no tpm' }
-        Test-BLTpmReady | Should -BeFalse
+    It 'reports NotReady from Win32_Tpm when present but not activated' {
+        function Get-CimInstance { param($Namespace,$ClassName) [pscustomobject]@{ IsEnabled_InitialValue=$true; IsActivated_InitialValue=$false } }
+        Get-BLTpmState | Should -Be 'NotReady'
+    }
+
+    It 'reports Absent only when Win32_Tpm has nothing AND Get-Tpm says no TPM' {
+        function Get-CimInstance { param($Namespace,$ClassName) $null }
+        function Get-Tpm { [pscustomobject]@{ TpmPresent=$false; TpmReady=$false } }
+        Get-BLTpmState | Should -Be 'Absent'
+    }
+
+    It 'reports NotReady (never Absent) when both TPM queries throw (e.g. Get-Tpm 0x80284005)' {
+        function Get-CimInstance { param($Namespace,$ClassName) throw 'wmi failed' }
+        function Get-Tpm { throw '0x80284005 output buffer too small' }
+        Get-BLTpmState | Should -Be 'NotReady'
     }
 
     It 'reports AC power when PowerOnline is true' {
@@ -117,7 +127,7 @@ Describe 'Environment wrappers' {
 
 Describe 'Get-CipherGuardrailStatus' {
     BeforeEach {
-        function Test-BLTpmReady { $true }
+        function Get-BLTpmState { 'Ready' }
         function Test-BLOnAcPower { $true }
         function Get-BLFreeSpaceGb { param($MountPoint) 100 }
         # Define the fixture in BeforeEach (run phase), NOT the Describe body
@@ -133,10 +143,16 @@ Describe 'Get-CipherGuardrailStatus' {
         $r = Get-CipherGuardrailStatus -CipherStatus ([pscustomobject]@{ MountPoint='C:'; Method='Hardware' })
         $r.Ok | Should -BeFalse; $r.Hard | Should -BeTrue
     }
-    It 'hard-fails when TPM is not ready' {
-        function Test-BLTpmReady { $false }
+    It 'hard-fails when the TPM is absent' {
+        function Get-BLTpmState { 'Absent' }
         $r = Get-CipherGuardrailStatus -CipherStatus $ok
         $r.Ok | Should -BeFalse; $r.Hard | Should -BeTrue
+    }
+    It 'soft-fails (transient) when the TPM is present but not ready' {
+        function Get-BLTpmState { 'NotReady' }
+        $r = Get-CipherGuardrailStatus -CipherStatus $ok
+        $r.Ok | Should -BeFalse; $r.Hard | Should -BeFalse
+        $r.Reason | Should -Match 'TPM'
     }
     It 'soft-fails (transient) when on battery' {
         function Test-BLOnAcPower { $false }
@@ -202,7 +218,7 @@ Describe 'Step engine: Init and VerifyPolicy' {
         $env:CIPHER_WORKDIR_OVERRIDE = Join-Path $TestDrive ([guid]::NewGuid())
         function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='XtsAes128'
             VolumeStatus='FullyEncrypted'; ProtectionStatus='On'; EncryptionPercentage=100; KeyProtector=@() } }
-        function Test-BLTpmReady { $true }; function Test-BLOnAcPower { $true }
+        function Get-BLTpmState { 'Ready' }; function Test-BLOnAcPower { $true }
         function Get-BLFreeSpaceGb { param($MountPoint) 100 }
         function Get-FveOsEncryptionMethod { 7 }
         # $now in BeforeEach (run phase); a Describe-body var is $null in It under Pester 5.
@@ -219,11 +235,16 @@ Describe 'Step engine: Init and VerifyPolicy' {
         $s = New-CipherState -NowUtc $now
         (Invoke-CipherRemediationStep -State $s -NowUtc $now).Phase | Should -Be 'Init'
     }
-    It 'Init -> Aborted (hard) when no TPM' {
-        function Test-BLTpmReady { $false }
+    It 'Init -> Aborted (hard) when no TPM present' {
+        function Get-BLTpmState { 'Absent' }
         $s = New-CipherState -NowUtc $now
         $r = Invoke-CipherRemediationStep -State $s -NowUtc $now
         $r.Phase | Should -Be 'Aborted'; $r.AbortReason | Should -Match 'TPM'
+    }
+    It 'Init stays Init (transient) when TPM present but not ready, below max age' {
+        function Get-BLTpmState { 'NotReady' }
+        $s = New-CipherState -NowUtc $now
+        (Invoke-CipherRemediationStep -State $s -NowUtc $now).Phase | Should -Be 'Init'
     }
     It 'Init -> Aborted when transient condition persists past max age' {
         function Test-BLOnAcPower { $false }

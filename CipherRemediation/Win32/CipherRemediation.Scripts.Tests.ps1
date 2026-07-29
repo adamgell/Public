@@ -46,7 +46,7 @@ Describe 'Invoke-CipherRemediationWorker' {
         $preamble = @'
 function Get-BitLockerVolume { param($MountPoint) [pscustomobject]@{ EncryptionMethod="XtsAes128"; VolumeStatus="FullyEncrypted"; ProtectionStatus="On"; EncryptionPercentage=100; KeyProtector=@() } }
 function Get-Tpm { [pscustomobject]@{ TpmPresent=$true; TpmReady=$true } }
-function Get-CimInstance { param($Namespace,$ClassName) [pscustomobject]@{ PowerOnline=$true } }
+function Get-CimInstance { param($Namespace,$ClassName) [pscustomobject]@{ PowerOnline=$true; IsEnabled_InitialValue=$true; IsActivated_InitialValue=$true } }
 function Get-Volume { param($DriveLetter) [pscustomobject]@{ SizeRemaining=500GB } }
 '@
         $r = Invoke-EntryScript -ScriptName 'Invoke-CipherRemediationWorker.ps1' -Preamble $preamble -EnvVars @{ CIPHER_WORKDIR_OVERRIDE = $work }
