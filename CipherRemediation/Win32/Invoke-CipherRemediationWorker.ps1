@@ -22,6 +22,13 @@ if (-not (Get-Command Get-BLCipherStatus -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot 'BitLockerCipher.Common.ps1')
 }
 
+# Log every invocation (whoami + bitness) so the scheduled-task run is visible in
+# remediation.log — if this line never appears, the task isn't running the worker.
+try {
+    Write-CipherLog -Message ("--- Worker invoked (user={0}, 64bit={1}) ---" -f `
+        [Environment]::UserName, [Environment]::Is64BitProcess)
+} catch {}
+
 $mutex = New-Object System.Threading.Mutex($false, 'Global\BitLockerCipherRemediation')
 $acquired = $false
 try {
@@ -35,10 +42,11 @@ try {
     }
     catch [System.Threading.AbandonedMutexException] {
         $acquired = $true
-        Write-Warning 'Previous remediation run was abandoned; recovering ownership.'
+        Write-CipherLog -Message 'Previous remediation run was abandoned; recovering ownership.'
     }
 
     if (-not $acquired) {
+        Write-CipherLog -Message 'Another remediation run is in progress; exiting (mutex held).'
         Write-Output 'Another remediation run is in progress; exiting.'
         exit 0
     }
@@ -47,6 +55,7 @@ try {
     if ($null -eq $state) { $state = New-CipherState -MountPoint 'C:' }
 
     if ($state.Phase -in @('Done', 'Aborted')) {
+        Write-CipherLog -Message "Terminal phase '$($state.Phase)'; nothing to do."
         Write-Output "Terminal phase '$($state.Phase)'; nothing to do."
         exit 0
     }
@@ -57,6 +66,12 @@ try {
     exit 0
 }
 catch {
+    # Surface the failure in remediation.log (not just the warning stream) so a
+    # scheduled-task run's error is never silent.
+    try {
+        Write-CipherLog -Message ("WORKER ERROR: {0} | {1}" -f `
+            $_.Exception.Message, ($_.ScriptStackTrace -replace '\r?\n', ' / '))
+    } catch {}
     Write-Warning "Cipher remediation worker failed: $($_.Exception.Message)"
     exit 1
 }
