@@ -22,6 +22,16 @@ if (-not (Get-Command Get-BLCipherStatus -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot 'BitLockerCipher.Common.ps1')
 }
 
+# Pin an absolute filesystem location. Under the SYSTEM scheduled-task host the
+# process current directory / PowerShell location can be a value that makes
+# path-resolving cmdlets throw "Relative paths are not supported." — give them a
+# valid absolute base so BitLocker/storage cmdlets resolve cleanly.
+if ($env:WINDIR) {
+    $sys32 = Join-Path $env:WINDIR 'System32'
+    try { Set-Location -LiteralPath $sys32 -ErrorAction Stop } catch {}
+    try { [System.Environment]::CurrentDirectory = $sys32 } catch {}
+}
+
 # Log every invocation (whoami + bitness) so the scheduled-task run is visible in
 # remediation.log — if this line never appears, the task isn't running the worker.
 try {
@@ -92,8 +102,12 @@ try {
         }
         catch {
             try {
-                Write-CipherLog -Message ("STEP ERROR (continuing next poll): {0} | {1}" -f `
-                    $_.Exception.Message, ($_.ScriptStackTrace -replace '\r?\n', ' / '))
+                $ex = $_
+                Write-CipherLog -Message ("STEP ERROR (continuing next poll): {0} [{1}] at {2} | {3}" -f `
+                    $ex.Exception.Message,
+                    $ex.Exception.GetType().FullName,
+                    (($ex.InvocationInfo.PositionMessage -replace '\r?\n', ' ')).Trim(),
+                    ($ex.ScriptStackTrace -replace '\r?\n', ' / '))
             } catch {}
         }
         if ($state.Phase -in @('Done', 'Aborted')) { break }
