@@ -209,15 +209,28 @@ function Invoke-BLDecrypt {
 
 function Invoke-BLEncryptXtsAes256 {
     param([string]$MountPoint = 'C:')
-    # 1) Provision/enable BitLocker (XtsAes256 + TPM protector, full disk). Throws
-    #    harmlessly if already armed.
+    # Starting encryption on the OS drive is finicky, so try several starters
+    # non-fatally (each logged) — one of them starts the conversion:
+    #
+    # 1) Enable-BitLocker -TpmProtector: provisions + starts on a FRESH volume, but
+    #    throws "only one key protector of this type is allowed" once a TPM protector
+    #    already exists (the armed-but-decrypted case).
     Write-CipherLog -Message "ACTION Enable-BitLocker $MountPoint XtsAes256 -TpmProtector ..."
     try { Enable-BitLocker -MountPoint $MountPoint -EncryptionMethod XtsAes256 -SkipHardwareTest -TpmProtector -ErrorAction Stop | Out-Null; Write-CipherLog -Message "ACTION OK: Enable-BitLocker $MountPoint" }
     catch { Write-CipherLog -Message "ACTION non-fatal FAILURE: Enable-BitLocker $MountPoint -> $($_.Exception.Message)" }
-    # 2) Enable-BitLocker frequently PROVISIONS without starting the conversion (drive
-    #    stays Fully Decrypted at 0% / Protection Off). Resume-BitLocker actually begins
-    #    or continues encryption; safe to call when already encrypting.
-    Write-CipherLog -Message "ACTION Resume-BitLocker $MountPoint (start/continue conversion) ..."
+    # 2) manage-bde -on: reliably STARTS the conversion using the existing protectors —
+    #    it works when Enable-BitLocker threw on a protector conflict AND when
+    #    Resume-BitLocker no-ops on a provisioned-but-not-started (0% / Protection Off)
+    #    volume, which is exactly the state that was stalling.
+    Write-CipherLog -Message "ACTION manage-bde -on $MountPoint (start conversion) ..."
+    try {
+        $mbde = Join-Path $env:WINDIR 'System32\manage-bde.exe'
+        $out  = & $mbde -on $MountPoint -SkipHardwareTest 2>&1
+        Write-CipherLog -Message ("manage-bde -on exit={0}: {1}" -f $LASTEXITCODE, (($out | Out-String).Trim() -replace '\s*\r?\n\s*', ' | '))
+    }
+    catch { Write-CipherLog -Message "ACTION non-fatal FAILURE: manage-bde -on $MountPoint -> $($_.Exception.Message)" }
+    # 3) Resume-BitLocker: resume a suspended/paused conversion (harmless otherwise).
+    Write-CipherLog -Message "ACTION Resume-BitLocker $MountPoint (resume if suspended) ..."
     try { Resume-BitLocker -MountPoint $MountPoint -ErrorAction Stop | Out-Null; Write-CipherLog -Message "ACTION OK: Resume-BitLocker $MountPoint" }
     catch { Write-CipherLog -Message "ACTION non-fatal FAILURE: Resume-BitLocker $MountPoint -> $($_.Exception.Message)" }
 }
