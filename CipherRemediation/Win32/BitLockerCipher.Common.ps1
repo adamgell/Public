@@ -81,10 +81,30 @@ function Write-CipherState {
 
 function Write-CipherLog {
     param([Parameter(Mandatory)][string]$Message)
-    $dir = Get-CipherWorkingDir
-    $null = New-Item -ItemType Directory -Path $dir -Force
+    # Logging must NEVER stop the remediation. A locked log file (a tailing
+    # Get-Content -Wait, CMTrace, or AV) used to throw a sharing violation that
+    # aborted the whole step. Write best-effort: open with read/write sharing so a
+    # reader can follow along, retry briefly if it's momentarily locked, and give up
+    # silently rather than throw.
     $line = '[{0}] {1}' -f (Get-Date).ToUniversalTime().ToString('o'), $Message
-    Add-Content -LiteralPath (Join-Path $dir 'remediation.log') -Value $line
+    try {
+        $dir = Get-CipherWorkingDir
+        if (-not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+        $path = Join-Path $dir 'remediation.log'
+    }
+    catch { return }
+    for ($i = 0; $i -lt 5; $i++) {
+        $fs = $null; $sw = $null
+        try {
+            $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+            $sw = New-Object System.IO.StreamWriter($fs, (New-Object System.Text.UTF8Encoding($false)))
+            $sw.WriteLine($line)
+            $sw.Flush()
+            return
+        }
+        catch { Start-Sleep -Milliseconds 100 }
+        finally { if ($sw) { $sw.Dispose() } elseif ($fs) { $fs.Dispose() } }
+    }
 }
 
 # ---------------------------------------------------------------------------
