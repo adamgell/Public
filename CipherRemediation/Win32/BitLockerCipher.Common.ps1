@@ -327,10 +327,28 @@ function Backup-BLRecoveryProtectorToAad {
         [string]$MountPoint = 'C:',
         [string]$NowUtc
     )
+    $allOk = $true
     foreach ($p in $Protectors) {
-        BackupToAAD-BitLockerKeyProtector -MountPoint $MountPoint -KeyProtectorId $p.KeyProtectorId -ErrorAction Stop
+        Write-CipherLog -Message "ACTION BackupToAAD-BitLockerKeyProtector $MountPoint $($p.KeyProtectorId) ..."
+        try {
+            BackupToAAD-BitLockerKeyProtector -MountPoint $MountPoint -KeyProtectorId $p.KeyProtectorId -ErrorAction Stop
+            Write-CipherLog -Message "ACTION OK: BackupToAAD $($p.KeyProtectorId)"
+        }
+        catch {
+            # Non-fatal: escrow can fail if the device isn't Entra-joined yet or AAD is
+            # briefly unreachable. Don't write the marker (so detection stays not-done and
+            # the worker retries every run); just log why.
+            $allOk = $false
+            Write-CipherLog -Message "ACTION non-fatal FAILURE: BackupToAAD $($p.KeyProtectorId) -> $($_.Exception.Message)"
+        }
     }
-    Write-CipherMarker -Protectors $Protectors -MountPoint $MountPoint -NowUtc $NowUtc
+    if ($allOk) {
+        Write-CipherMarker -Protectors $Protectors -MountPoint $MountPoint -NowUtc $NowUtc
+        Write-CipherLog -Message "Escrow recorded (marker written) for $MountPoint"
+    }
+    else {
+        Write-CipherLog -Message "Escrow incomplete for $MountPoint; marker NOT written, will retry next run."
+    }
 }
 
 # ---------------------------------------------------------------------------
