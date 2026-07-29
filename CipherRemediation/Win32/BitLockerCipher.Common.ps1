@@ -175,43 +175,29 @@ function Get-CipherGuardrailStatus {
 # ---------------------------------------------------------------------------
 # BitLocker actions
 # ---------------------------------------------------------------------------
+# All BitLocker actions below log their attempt + result/error and are NON-FATAL:
+# the state machine re-reads the real drive state on the next run and retries, so a
+# single failed cmdlet must never kill the worker or stall progress.
 function Invoke-BLDecrypt {
     param([string]$MountPoint = 'C:')
-    Write-CipherLog -Message "ACTION Disable-BitLocker $MountPoint (start decryption)..."
-    try {
-        Disable-BitLocker -MountPoint $MountPoint -ErrorAction Stop | Out-Null
-        Write-CipherLog -Message "ACTION OK: Disable-BitLocker $MountPoint"
-    }
-    catch {
-        Write-CipherLog -Message "ACTION FAILED: Disable-BitLocker $MountPoint -> $($_.Exception.Message)"
-        throw
-    }
+    Write-CipherLog -Message "ACTION Disable-BitLocker $MountPoint (start decryption) ..."
+    try { Disable-BitLocker -MountPoint $MountPoint -ErrorAction Stop | Out-Null; Write-CipherLog -Message "ACTION OK: Disable-BitLocker $MountPoint" }
+    catch { Write-CipherLog -Message "ACTION non-fatal FAILURE: Disable-BitLocker $MountPoint -> $($_.Exception.Message)" }
 }
 
 function Invoke-BLEncryptXtsAes256 {
     param([string]$MountPoint = 'C:')
-    # Enable-BitLocker requires a protector parameter set; -TpmProtector both starts
-    # encryption and creates the TPM protector needed for unattended boot. Full disk
-    # (no -UsedSpaceOnly). The recovery-password protector is added separately.
-    Write-CipherLog -Message "ACTION Enable-BitLocker $MountPoint XtsAes256 -TpmProtector..."
-    try {
-        Enable-BitLocker -MountPoint $MountPoint -EncryptionMethod XtsAes256 -SkipHardwareTest -TpmProtector -ErrorAction Stop | Out-Null
-        Write-CipherLog -Message "ACTION OK: Enable-BitLocker $MountPoint"
-    }
-    catch {
-        # The volume is already provisioned/armed (method + protectors set but the
-        # conversion never ran or is paused) — Enable-BitLocker throws. Resume the
-        # stalled conversion instead of failing so encryption actually starts.
-        Write-CipherLog -Message "ACTION Enable-BitLocker threw ($($_.Exception.Message)); trying Resume-BitLocker $MountPoint..."
-        try {
-            Resume-BitLocker -MountPoint $MountPoint -ErrorAction Stop | Out-Null
-            Write-CipherLog -Message "ACTION OK: Resume-BitLocker $MountPoint"
-        }
-        catch {
-            Write-CipherLog -Message "ACTION FAILED: Resume-BitLocker $MountPoint -> $($_.Exception.Message)"
-            throw
-        }
-    }
+    # 1) Provision/enable BitLocker (XtsAes256 + TPM protector, full disk). Throws
+    #    harmlessly if already armed.
+    Write-CipherLog -Message "ACTION Enable-BitLocker $MountPoint XtsAes256 -TpmProtector ..."
+    try { Enable-BitLocker -MountPoint $MountPoint -EncryptionMethod XtsAes256 -SkipHardwareTest -TpmProtector -ErrorAction Stop | Out-Null; Write-CipherLog -Message "ACTION OK: Enable-BitLocker $MountPoint" }
+    catch { Write-CipherLog -Message "ACTION non-fatal FAILURE: Enable-BitLocker $MountPoint -> $($_.Exception.Message)" }
+    # 2) Enable-BitLocker frequently PROVISIONS without starting the conversion (drive
+    #    stays Fully Decrypted at 0% / Protection Off). Resume-BitLocker actually begins
+    #    or continues encryption; safe to call when already encrypting.
+    Write-CipherLog -Message "ACTION Resume-BitLocker $MountPoint (start/continue conversion) ..."
+    try { Resume-BitLocker -MountPoint $MountPoint -ErrorAction Stop | Out-Null; Write-CipherLog -Message "ACTION OK: Resume-BitLocker $MountPoint" }
+    catch { Write-CipherLog -Message "ACTION non-fatal FAILURE: Resume-BitLocker $MountPoint -> $($_.Exception.Message)" }
 }
 
 function Test-BLHasProtectorType {
@@ -223,12 +209,9 @@ function Add-BLTpmProtectorIfMissing {
     param([string]$MountPoint = 'C:')
     $status = Get-BLCipherStatus -MountPoint $MountPoint
     if (-not (Test-BLHasProtectorType -KeyProtector $status.KeyProtector -Type 'Tpm')) {
-        Write-CipherLog -Message "ACTION Add-BitLockerKeyProtector -TpmProtector $MountPoint..."
-        try {
-            Add-BitLockerKeyProtector -MountPoint $MountPoint -TpmProtector -ErrorAction Stop | Out-Null
-            Write-CipherLog -Message "ACTION OK: Add TPM protector $MountPoint"
-        }
-        catch { Write-CipherLog -Message "ACTION FAILED: Add TPM protector $MountPoint -> $($_.Exception.Message)"; throw }
+        Write-CipherLog -Message "ACTION Add TPM protector $MountPoint ..."
+        try { Add-BitLockerKeyProtector -MountPoint $MountPoint -TpmProtector -ErrorAction Stop | Out-Null; Write-CipherLog -Message "ACTION OK: Add TPM protector $MountPoint" }
+        catch { Write-CipherLog -Message "ACTION non-fatal FAILURE: Add TPM protector $MountPoint -> $($_.Exception.Message)" }
     }
 }
 
@@ -240,12 +223,9 @@ function Add-BLRecoveryProtector {
     # to be recorded), which would stall detection.
     $status = Get-BLCipherStatus -MountPoint $MountPoint
     if ((Get-BLRecoveryProtectors -KeyProtector $status.KeyProtector).Count -eq 0) {
-        Write-CipherLog -Message "ACTION Add-BitLockerKeyProtector -RecoveryPasswordProtector $MountPoint..."
-        try {
-            Add-BitLockerKeyProtector -MountPoint $MountPoint -RecoveryPasswordProtector -ErrorAction Stop | Out-Null
-            Write-CipherLog -Message "ACTION OK: Add recovery protector $MountPoint"
-        }
-        catch { Write-CipherLog -Message "ACTION FAILED: Add recovery protector $MountPoint -> $($_.Exception.Message)"; throw }
+        Write-CipherLog -Message "ACTION Add recovery protector $MountPoint ..."
+        try { Add-BitLockerKeyProtector -MountPoint $MountPoint -RecoveryPasswordProtector -ErrorAction Stop | Out-Null; Write-CipherLog -Message "ACTION OK: Add recovery protector $MountPoint" }
+        catch { Write-CipherLog -Message "ACTION non-fatal FAILURE: Add recovery protector $MountPoint -> $($_.Exception.Message)" }
     }
 }
 
