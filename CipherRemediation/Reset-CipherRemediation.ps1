@@ -50,6 +50,15 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 $workDir  = Join-Path $env:ProgramData 'BitLockerCipherRemediation'
 $taskName = 'BitLockerCipherRemediation'
 
+# 0) Stop any running worker FIRST --------------------------------------------
+# The worker is long-running: an existing instance holds the OLD Common.ps1 in
+# memory (dot-sourced at launch) and the single-instance mutex. Without stopping
+# it, re-staging new code + Start-ScheduledTask (MultipleInstances=IgnoreNew) is a
+# no-op — the stale instance just keeps polling with old code.
+Say 'stopping any running task/worker...'
+Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
+Start-Sleep -Seconds 2
+
 # 1) Decrypt the OS drive ------------------------------------------------------
 if ($SkipDecrypt) {
     Say 'Skipping decrypt (-SkipDecrypt).'
