@@ -60,8 +60,17 @@ try {
         exit 0
     }
 
-    $state = Invoke-CipherRemediationStep -State $state
-    Write-CipherState -State $state
+    # Advance through every INSTANT transition this run (Init -> VerifyPolicy ->
+    # Decrypt(start) -> ...), stopping when we re-enter a phase we've already run this
+    # tick (now genuinely waiting on the drive to decrypt/encrypt, or on an external
+    # condition) or reach a terminal phase. A phase runs at most once per tick, so this
+    # can't spin. One task tick then makes real progress instead of a single hop.
+    $visited = @{}
+    while ($state.Phase -notin @('Done', 'Aborted') -and -not $visited.ContainsKey($state.Phase)) {
+        $visited[$state.Phase] = $true
+        $state = Invoke-CipherRemediationStep -State $state
+        Write-CipherState -State $state
+    }
     Write-Output "Phase is now '$($state.Phase)': $($state.LastMessage)"
     exit 0
 }
