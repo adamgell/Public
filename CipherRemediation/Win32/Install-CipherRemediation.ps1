@@ -40,8 +40,11 @@ try {
     $atStart = New-ScheduledTaskTrigger -AtStartup
     # -RepetitionDuration is required: without it the 15-min repetition stops firing
     # after its (build-dependent) default window, which is why a stuck device went
-    # weeks without the worker running. MaxValue = repeat indefinitely.
-    $repeat  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration ([TimeSpan]::MaxValue)
+    # weeks without the worker running. [TimeSpan]::MaxValue serializes to an
+    # out-of-range task-XML duration and Register-ScheduledTask rejects it, so use a
+    # large finite duration (10 years) that Task Scheduler accepts and is effectively
+    # indefinite for this remediation.
+    $repeat  = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Days 3650)
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($atStart, $repeat) -Principal $principal -Settings $settings -Force | Out-Null
