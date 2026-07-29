@@ -221,12 +221,20 @@ function Invoke-BLEncryptXtsAes256 {
     # 2) manage-bde -on: reliably STARTS the conversion using the existing protectors —
     #    it works when Enable-BitLocker threw on a protector conflict AND when
     #    Resume-BitLocker no-ops on a provisioned-but-not-started (0% / Protection Off)
-    #    volume, which is exactly the state that was stalling.
-    Write-CipherLog -Message "ACTION manage-bde -on $MountPoint (start conversion) ..."
+    #    volume, which is exactly the state that was stalling. Full-disk first; thin-
+    #    provisioned storage (VMs, some SANs) rejects full-disk with 0x803100a5 and only
+    #    supports Used Space Only encryption -> retry that way.
+    Write-CipherLog -Message "ACTION manage-bde -on $MountPoint (start conversion, full disk) ..."
     try {
         $mbde = Join-Path $env:WINDIR 'System32\manage-bde.exe'
         $out  = & $mbde -on $MountPoint -SkipHardwareTest 2>&1
-        Write-CipherLog -Message ("manage-bde -on exit={0}: {1}" -f $LASTEXITCODE, (($out | Out-String).Trim() -replace '\s*\r?\n\s*', ' | '))
+        $code = $LASTEXITCODE
+        Write-CipherLog -Message ("manage-bde -on exit={0}: {1}" -f $code, (($out | Out-String).Trim() -replace '\s*\r?\n\s*', ' | '))
+        if ($code -ne 0 -and (($out | Out-String) -match '0x803100a5|Used Space Only')) {
+            Write-CipherLog -Message "ACTION manage-bde -on $MountPoint -UsedSpaceOnly (thin-provisioned storage) ..."
+            $out2 = & $mbde -on $MountPoint -UsedSpaceOnly -SkipHardwareTest 2>&1
+            Write-CipherLog -Message ("manage-bde -on -UsedSpaceOnly exit={0}: {1}" -f $LASTEXITCODE, (($out2 | Out-String).Trim() -replace '\s*\r?\n\s*', ' | '))
+        }
     }
     catch { Write-CipherLog -Message "ACTION non-fatal FAILURE: manage-bde -on $MountPoint -> $($_.Exception.Message)" }
     # 3) Resume-BitLocker: resume a suspended/paused conversion (harmless otherwise).
