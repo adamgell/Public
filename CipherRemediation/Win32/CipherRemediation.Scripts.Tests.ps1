@@ -49,7 +49,9 @@ function Get-Tpm { [pscustomobject]@{ TpmPresent=$true; TpmReady=$true } }
 function Get-CimInstance { param($Namespace,$ClassName) [pscustomobject]@{ PowerOnline=$true; IsEnabled_InitialValue=$true; IsActivated_InitialValue=$true } }
 function Get-Volume { param($DriveLetter) [pscustomobject]@{ SizeRemaining=500GB } }
 '@
-        $r = Invoke-EntryScript -ScriptName 'Invoke-CipherRemediationWorker.ps1' -Preamble $preamble -EnvVars @{ CIPHER_WORKDIR_OVERRIDE = $work }
+        # CIPHER_WORKER_MAX_CYCLES=1: the worker is long-running (polls until Done/Aborted);
+        # cap it to a single poll cycle so the test doesn't loop/sleep.
+        $r = Invoke-EntryScript -ScriptName 'Invoke-CipherRemediationWorker.ps1' -Preamble $preamble -EnvVars @{ CIPHER_WORKDIR_OVERRIDE = $work; CIPHER_WORKER_MAX_CYCLES = '1' }
         $r.ExitCode | Should -Be 0
         $state = Get-Content -LiteralPath (Join-Path $work 'state.json') -Raw | ConvertFrom-Json
         $state.Phase | Should -Be 'VerifyPolicy'

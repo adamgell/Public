@@ -60,16 +60,36 @@ try {
         exit 0
     }
 
-    # Advance through every INSTANT transition this run (Init -> VerifyPolicy ->
-    # Decrypt(start) -> ...), stopping when we re-enter a phase we've already run this
-    # tick (now genuinely waiting on the drive to decrypt/encrypt, or on an external
-    # condition) or reach a terminal phase. A phase runs at most once per tick, so this
-    # can't spin. One task tick then makes real progress instead of a single hop.
-    $visited = @{}
-    while ($state.Phase -notin @('Done', 'Aborted') -and -not $visited.ContainsKey($state.Phase)) {
-        $visited[$state.Phase] = $true
-        $state = Invoke-CipherRemediationStep -State $state
-        Write-CipherState -State $state
+    # Long-running: the worker stays alive and drives the state machine all the way to
+    # Done/Aborted, polling the drive during the decrypt/encrypt waits, instead of doing
+    # one hop and exiting to wait for the next 15-min task tick. The scheduled task's job
+    # is just to keep ONE worker running (the mutex + the task's IgnoreNew setting enforce
+    # single-instance); it relaunches a worker only if the previous one exited before Done
+    # (crash, reboot, or the lifetime cap below).
+    #
+    # Each poll cycle advances every INSTANT transition (each phase runs at most once per
+    # cycle via $visited, so it can't spin), then sleeps while genuinely waiting on the
+    # drive. Env overrides (CIPHER_WORKER_POLL_SECONDS / CIPHER_WORKER_MAX_CYCLES) exist
+    # for testing.
+    $pollSeconds = if ($env:CIPHER_WORKER_POLL_SECONDS) { [int]$env:CIPHER_WORKER_POLL_SECONDS } else { 30 }
+    $maxCycles   = if ($env:CIPHER_WORKER_MAX_CYCLES)   { [int]$env:CIPHER_WORKER_MAX_CYCLES }   else { 0 }
+    $deadline    = (Get-Date).AddHours(24)
+    $cycle = 0
+    while ($state.Phase -notin @('Done', 'Aborted')) {
+        $cycle++
+        $visited = @{}
+        while ($state.Phase -notin @('Done', 'Aborted') -and -not $visited.ContainsKey($state.Phase)) {
+            $visited[$state.Phase] = $true
+            $state = Invoke-CipherRemediationStep -State $state
+            Write-CipherState -State $state
+        }
+        if ($state.Phase -in @('Done', 'Aborted')) { break }
+        if ($maxCycles -gt 0 -and $cycle -ge $maxCycles) { break }
+        if ((Get-Date) -gt $deadline) {
+            Write-CipherLog -Message '24h worker lifetime reached; exiting (task relaunches to continue).'
+            break
+        }
+        Start-Sleep -Seconds $pollSeconds
     }
     Write-Output "Phase is now '$($state.Phase)': $($state.LastMessage)"
     exit 0
