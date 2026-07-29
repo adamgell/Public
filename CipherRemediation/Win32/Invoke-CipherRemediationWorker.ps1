@@ -77,11 +77,24 @@ try {
     $cycle = 0
     while ($state.Phase -notin @('Done', 'Aborted')) {
         $cycle++
-        $visited = @{}
-        while ($state.Phase -notin @('Done', 'Aborted') -and -not $visited.ContainsKey($state.Phase)) {
-            $visited[$state.Phase] = $true
-            $state = Invoke-CipherRemediationStep -State $state
-            Write-CipherState -State $state
+        # A single step throwing must NOT kill the long-running worker: the drive keeps
+        # converting on its own and the escrow marker is durable, so a transient error
+        # (a momentary BitLocker/cmdlet hiccup mid-conversion) should be logged and
+        # re-tried on the next poll, not abort the whole remediation. Fatal setup errors
+        # (mutex, module load) are still caught by the outer try below.
+        try {
+            $visited = @{}
+            while ($state.Phase -notin @('Done', 'Aborted') -and -not $visited.ContainsKey($state.Phase)) {
+                $visited[$state.Phase] = $true
+                $state = Invoke-CipherRemediationStep -State $state
+                Write-CipherState -State $state
+            }
+        }
+        catch {
+            try {
+                Write-CipherLog -Message ("STEP ERROR (continuing next poll): {0} | {1}" -f `
+                    $_.Exception.Message, ($_.ScriptStackTrace -replace '\r?\n', ' / '))
+            } catch {}
         }
         if ($state.Phase -in @('Done', 'Aborted')) { break }
         if ($maxCycles -gt 0 -and $cycle -ge $maxCycles) { break }
