@@ -47,7 +47,13 @@ Describe 'Invoke-CipherRemediationWorker' {
 function Get-BitLockerVolume { param($MountPoint) [pscustomobject]@{ EncryptionMethod="XtsAes128"; VolumeStatus="FullyEncrypted"; ProtectionStatus="On"; EncryptionPercentage=100; KeyProtector=@() } }
 function Get-Tpm { [pscustomobject]@{ TpmPresent=$true; TpmReady=$true } }
 function Get-CimInstance { param($Namespace,$ClassName) [pscustomobject]@{ PowerOnline=$true; IsEnabled_InitialValue=$true; IsActivated_InitialValue=$true } }
+function Invoke-CimMethod { param($InputObject,$MethodName,$ErrorAction) [pscustomobject]@{ IsReady=$true } }
 function Get-Volume { param($DriveLetter) [pscustomobject]@{ SizeRemaining=500GB } }
+# Keep the test hermetic: shadow the FVE policy read so this asserts exactly one phase
+# advance (Init -> VerifyPolicy) regardless of whether the HOST machine actually has the
+# XtsAes256 Intune policy present (which would legitimately drive Init -> VerifyPolicy ->
+# Decrypt in a single poll cycle and is not what this test is exercising).
+function Get-ItemProperty { param($Path,$Name,$ErrorAction) throw 'FVE policy not present (test)' }
 '@
         # CIPHER_WORKER_MAX_CYCLES=1: the worker is long-running (polls until Done/Aborted);
         # cap it to a single poll cycle so the test doesn't loop/sleep.

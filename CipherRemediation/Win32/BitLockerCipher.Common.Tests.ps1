@@ -52,6 +52,22 @@ Describe 'Cipher state persistence' {
         $log = Join-Path $env:CIPHER_WORKDIR_OVERRIDE 'remediation.log'
         (Get-Content -LiteralPath $log -Raw) | Should -Match 'hello'
     }
+
+    It 'self-heals a corrupted array state file to the single element carrying a Phase' {
+        $work = $env:CIPHER_WORKDIR_OVERRIDE
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        # Simulate the pre-fix corruption: a stray Get-BitLockerVolume object persisted
+        # ahead of the real state object (the BackupToAAD output leak).
+        $corrupt = @(
+            [pscustomobject]@{ ComputerName='X'; EncryptionPercentage=83; KeyProtector=@() }
+            [pscustomobject]@{ Phase='BackupKey'; MountPoint='C:'; FirstSeenUtc='2026-07-10T00:00:00.0000000Z'; LastMessage='x'; AbortReason=$null }
+        )
+        $corrupt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $work 'state.json') -Encoding utf8
+        $loaded = Read-CipherState
+        @($loaded).Count | Should -Be 1
+        $loaded.Phase | Should -Be 'BackupKey'
+        $loaded.MountPoint | Should -Be 'C:'
+    }
 }
 
 Describe 'Environment wrappers' {
@@ -71,6 +87,57 @@ Describe 'Environment wrappers' {
         Get-FveOsEncryptionMethod | Should -Be 7
     }
 
+    It 'maps CIM protector-type and conversion-status ints to friendly names' {
+        Convert-BLKeyProtectorTypeName -Type 1 | Should -Be 'Tpm'
+        Convert-BLKeyProtectorTypeName -Type 3 | Should -Be 'RecoveryPassword'
+        Convert-BLConversionStatusName -Status 0 | Should -Be 'FullyDecrypted'
+        Convert-BLConversionStatusName -Status 1 | Should -Be 'FullyEncrypted'
+        Convert-BLConversionStatusName -Status 3 | Should -Be 'DecryptionInProgress'
+    }
+
+    It 'Get-BLTpmState reports NotReady when enabled+activated but IsReady() is False (vTPM fault)' {
+        function Get-CimInstance { param($Namespace,$ClassName,$ErrorAction) [pscustomobject]@{ IsEnabled_InitialValue=$true; IsActivated_InitialValue=$true } }
+        function Invoke-CimMethod { param($InputObject,$MethodName,$ErrorAction) [pscustomobject]@{ IsReady=$false } }
+        Get-BLTpmState | Should -Be 'NotReady'
+    }
+
+    It 'Get-BLTpmState reports Ready only when IsReady() is True' {
+        function Get-CimInstance { param($Namespace,$ClassName,$ErrorAction) [pscustomobject]@{ IsEnabled_InitialValue=$true; IsActivated_InitialValue=$true } }
+        function Invoke-CimMethod { param($InputObject,$MethodName,$ErrorAction) [pscustomobject]@{ IsReady=$true } }
+        Get-BLTpmState | Should -Be 'Ready'
+    }
+
+    It 'falls back to a CIM status read when Get-BitLockerVolume throws (SYSTEM-host self-heal)' {
+        $env:CIPHER_WORKDIR_OVERRIDE = Join-Path $TestDrive ([guid]::NewGuid())
+        # Reproduce the SYSTEM-host failure: Get-BitLockerVolume throws "Relative paths ...".
+        function Get-BitLockerVolume { param($MountPoint,$ErrorAction) throw 'Relative paths are not supported.' }
+        function Get-CimInstance { param($Namespace,$ClassName,$Filter,$ErrorAction) [pscustomobject]@{ ProtectionStatus = 1 } }
+        function Invoke-CimMethod {
+            param($InputObject,$MethodName,$Arguments)
+            switch ($MethodName) {
+                'GetEncryptionMethod' { [pscustomobject]@{ EncryptionMethod = 7 } }
+                'GetConversionStatus' { [pscustomobject]@{ ConversionStatus = 1; EncryptionPercentage = 100 } }
+                'GetKeyProtectors'    { [pscustomobject]@{ VolumeKeyProtectorID = @('{TPM}', '{REC}') } }
+                'GetKeyProtectorType' {
+                    if ($Arguments.VolumeKeyProtectorID -eq '{TPM}') { [pscustomobject]@{ KeyProtectorType = 1 } }
+                    else { [pscustomobject]@{ KeyProtectorType = 3 } }
+                }
+                'GetKeyProtectorNumericalPassword' {
+                    [pscustomobject]@{ ReturnValue = 0; NumericalPassword = '111111-222222-333333-444444-555555-666666-777777-888888' }
+                }
+            }
+        }
+        $s = Get-BLCipherStatus -MountPoint 'C:'
+        $s.Method | Should -Be '7'
+        $s.EncryptionPercentage | Should -Be 100
+        $s.ProtectionStatus | Should -Be '1'
+        $s.VolumeStatus | Should -Be 'FullyEncrypted'
+        # The recovery protector (CIM type 3) is discoverable with its password intact.
+        @(Get-BLRecoveryProtectors -KeyProtector $s.KeyProtector).Count | Should -Be 1
+        Test-BLHasProtectorType -KeyProtector $s.KeyProtector -Type 'Tpm' | Should -BeTrue
+        Remove-Item Env:CIPHER_WORKDIR_OVERRIDE -ErrorAction SilentlyContinue
+    }
+
     It 'returns $null when the FVE policy value is missing' {
         function Get-ItemProperty { param($Path,$Name,$ErrorAction) throw 'missing' }
         Get-FveOsEncryptionMethod | Should -BeNullOrEmpty
@@ -87,8 +154,9 @@ Describe 'Environment wrappers' {
         Test-BLOnAcPower | Should -BeFalse
     }
 
-    It 'reports Ready from Win32_Tpm when enabled and activated' {
+    It 'reports Ready from Win32_Tpm when enabled, activated, and IsReady()' {
         function Get-CimInstance { param($Namespace,$ClassName) [pscustomobject]@{ IsEnabled_InitialValue=$true; IsActivated_InitialValue=$true } }
+        function Invoke-CimMethod { param($InputObject,$MethodName,$ErrorAction) [pscustomobject]@{ IsReady=$true } }
         Get-BLTpmState | Should -Be 'Ready'
     }
 
@@ -198,7 +266,16 @@ Describe 'BitLocker action wrappers and AAD backup' {
         $mixed = @(
             [pscustomobject]@{ KeyProtectorType='Tpm'; KeyProtectorId='{T}'; RecoveryPassword=$null }
         ) + $protectors
-        (Get-BLRecoveryProtectors -KeyProtector $mixed).Count | Should -Be 1
+        @(Get-BLRecoveryProtectors -KeyProtector $mixed).Count | Should -Be 1
+    }
+
+    It 'detects a recovery protector whose type surfaces as the CIM integer 3' {
+        $cimShape = @(
+            [pscustomobject]@{ KeyProtectorType=1; KeyProtectorId='{T}'; RecoveryPassword='' }
+            [pscustomobject]@{ KeyProtectorType=3; KeyProtectorId='{R}'
+                RecoveryPassword='111111-222222-333333-444444-555555-666666-777777-888888' }
+        )
+        @(Get-BLRecoveryProtectors -KeyProtector $cimShape).Count | Should -Be 1
     }
 
     It 'backs up to AAD and records a hashed marker (never plaintext)' {
@@ -279,6 +356,9 @@ Describe 'Step engine: Decrypt and Encrypt' {
         # Decrypt re-asserts the policy gate before the first Disable; default it to 7
         # (XtsAes256 present) so the happy-path Decrypt tests still start decryption.
         function Get-FveOsEncryptionMethod { 7 }
+        # Fresh-encryption start now gates on a BitLocker-ready TPM; default it Ready so the
+        # happy-path Encrypt tests proceed (a specific test overrides it to NotReady).
+        function Get-BLTpmState { 'Ready' }
         # $now + helper in BeforeEach (run phase); Describe-body definitions are $null/undefined in It under Pester 5.
         $now = '2026-07-10T00:00:00.0000000Z'
         function New-Decrypting { param($s) $s.Phase='Decrypt'; $s }
@@ -351,6 +431,28 @@ Describe 'Step engine: Decrypt and Encrypt' {
         $script:tpmCalled | Should -Be 1
         $script:recoveryCalled | Should -Be 1
         $r.Phase | Should -Be 'BackupKey'
+    }
+
+    It 'Encrypt (fresh) WAITS instead of starting when the TPM is not BitLocker-ready' {
+        function Get-BLTpmState { 'NotReady' }   # e.g. a vTPM in a transient failure state
+        function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='None'
+            VolumeStatus='FullyDecrypted'; ProtectionStatus='Off'; EncryptionPercentage=0; KeyProtector=@() } }
+        $s = New-CipherState -NowUtc $now; $s.Phase='Encrypt'
+        $r = Invoke-CipherRemediationStep -State $s -NowUtc $now
+        $script:encryptCalled | Should -Be 0      # must NOT fire a doomed Enable-BitLocker
+        $script:recoveryCalled | Should -Be 0
+        $r.Phase | Should -Be 'Encrypt'           # stays put, waiting for the TPM
+    }
+
+    It 'Encrypt (fresh) aborts when the TPM is not ready past MaxAgeDays' {
+        function Get-BLTpmState { 'NotReady' }
+        function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='None'
+            VolumeStatus='FullyDecrypted'; ProtectionStatus='Off'; EncryptionPercentage=0; KeyProtector=@() } }
+        $s = New-CipherState -NowUtc '2026-06-01T00:00:00.0000000Z'; $s.Phase='Encrypt'
+        $r = Invoke-CipherRemediationStep -State $s -NowUtc $now -MaxAgeDays 7
+        $script:encryptCalled | Should -Be 0
+        $r.Phase | Should -Be 'Aborted'
+        $r.AbortReason | Should -Be 'TPM not ready for BitLocker'
     }
 }
 
@@ -440,6 +542,34 @@ Describe 'Step engine: BackupKey and Done' {
         $s = New-CipherState -NowUtc $now; $s.Phase='BackupKey'
         $r = Invoke-CipherRemediationStep -State $s -NowUtc $now
         $r.Phase | Should -Be 'BackupKey'
+        $script:unregistered | Should -Be 0
+    }
+
+    # Safety-critical: escrow is the WHOLE POINT. A fully-encrypted, protected drive whose
+    # recovery key is NOT yet confirmed in Entra (e.g. transient AAD/DNS failure, 0x80072F9A)
+    # must NOT reach Done or self-delete the task — it must keep retrying the escrow.
+    It 'does NOT reach Done or unregister when encrypted+protected but escrow is unconfirmed' {
+        function Test-AllRecoveryProtectorsBackedUp { param($Protectors,$MountPoint) $false }  # escrow never confirms
+        function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='XtsAes256'
+            VolumeStatus='FullyEncrypted'; ProtectionStatus='On'; EncryptionPercentage=100
+            KeyProtector=@([pscustomobject]@{ KeyProtectorType='RecoveryPassword'; KeyProtectorId='{AAA}'; RecoveryPassword='111111-222222-333333-444444-555555-666666-777777-888888' }) } }
+        $s = New-CipherState -NowUtc $now; $s.Phase='BackupKey'
+        $r = Invoke-CipherRemediationStep -State $s -NowUtc $now
+        $r.Phase | Should -Be 'BackupKey'
+        $script:aadCalled | Should -BeGreaterThan 0    # keeps attempting to escrow
+        $script:unregistered | Should -Be 0           # but never self-deletes with the key un-escrowed
+    }
+
+    It 'aborts (visibly) when encrypted but escrow never succeeds past MaxAgeDays' {
+        function Test-AllRecoveryProtectorsBackedUp { param($Protectors,$MountPoint) $false }
+        function Get-BLCipherStatus { param($MountPoint) [pscustomobject]@{ MountPoint='C:'; Method='XtsAes256'
+            VolumeStatus='FullyEncrypted'; ProtectionStatus='On'; EncryptionPercentage=100
+            KeyProtector=@([pscustomobject]@{ KeyProtectorType='RecoveryPassword'; KeyProtectorId='{AAA}'; RecoveryPassword='111111-222222-333333-444444-555555-666666-777777-888888' }) } }
+        # FirstSeenUtc far in the past so the age-out fires this poll.
+        $s = New-CipherState -NowUtc '2026-06-01T00:00:00.0000000Z'; $s.Phase='BackupKey'
+        $r = Invoke-CipherRemediationStep -State $s -NowUtc $now -MaxAgeDays 7
+        $r.Phase | Should -Be 'Aborted'
+        $r.AbortReason | Should -Be 'AAD recovery-key escrow failed'
         $script:unregistered | Should -Be 0
     }
 }

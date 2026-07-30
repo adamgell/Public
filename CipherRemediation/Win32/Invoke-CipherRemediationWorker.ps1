@@ -39,7 +39,18 @@ try {
         [Environment]::UserName, [Environment]::Is64BitProcess)
 } catch {}
 
-$mutex = New-Object System.Threading.Mutex($false, 'Global\BitLockerCipherRemediation')
+# Single-instance guard. A Global\ mutex spans sessions (correct for the SYSTEM task),
+# but creating one needs SeCreateGlobalPrivilege — SYSTEM/elevated have it, a non-elevated
+# manual or test run does not, and there the ctor throws UnauthorizedAccessException. Rather
+# than die on that (the worker would exit before doing any work), fall back to a session-local
+# mutex, which still prevents concurrent instances in that session.
+try {
+    $mutex = New-Object System.Threading.Mutex($false, 'Global\BitLockerCipherRemediation')
+}
+catch {
+    try { Write-CipherLog -Message "Global mutex unavailable ($($_.Exception.Message)); using a session-local mutex." } catch {}
+    $mutex = New-Object System.Threading.Mutex($false, 'Local\BitLockerCipherRemediation')
+}
 $acquired = $false
 try {
     # A prior run hard-killed while holding the mutex (e.g. Task Scheduler

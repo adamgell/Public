@@ -69,7 +69,17 @@ function New-CipherState {
 function Read-CipherState {
     $path = Get-CipherStatePath
     if (-not (Test-Path -LiteralPath $path)) { return $null }
-    try { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { $null }
+    $parsed = $null
+    try { $parsed = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { return $null }
+    # Self-heal a corrupted state file: ConvertFrom-Json yields an array if a stray object
+    # was ever persisted alongside the real state (see the BackupToAAD Out-Null note). An
+    # array $State makes Set-CipherPhase throw and $State.MountPoint enumerate to multiple
+    # values, so collapse to the single element that actually carries a Phase. The next
+    # Write-CipherState then rewrites the file clean.
+    if ($parsed -is [System.Array]) {
+        $parsed = @($parsed | Where-Object { $_.PSObject.Properties.Name -contains 'Phase' }) | Select-Object -Last 1
+    }
+    $parsed
 }
 
 function Write-CipherState {
@@ -110,16 +120,108 @@ function Write-CipherLog {
 # ---------------------------------------------------------------------------
 # Environment wrappers (Windows-only cmdlets isolated here)
 # ---------------------------------------------------------------------------
-function Get-BLCipherStatus {
+# Map the integer enums the raw Win32_EncryptableVolume CIM class returns onto the
+# friendly-name representation Get-BitLockerVolume surfaces, so callers see one shape
+# regardless of which source produced the status. The state predicates already accept
+# either representation for cipher/protection, but the KeyProtector *type* is compared
+# as a plain string ('Tpm' / 'RecoveryPassword'), so those two must be named exactly.
+function Convert-BLKeyProtectorTypeName {
+    param([int]$Type)
+    switch ($Type) {
+        1       { 'Tpm' }
+        2       { 'ExternalKey' }
+        3       { 'RecoveryPassword' }
+        4       { 'TpmPin' }
+        5       { 'TpmStartupKey' }
+        6       { 'TpmPinStartupKey' }
+        7       { 'PublicKey' }
+        8       { 'Passphrase' }
+        default { [string]$Type }
+    }
+}
+
+function Convert-BLConversionStatusName {
+    param([int]$Status)
+    switch ($Status) {
+        0       { 'FullyDecrypted' }
+        1       { 'FullyEncrypted' }
+        2       { 'EncryptionInProgress' }
+        3       { 'DecryptionInProgress' }
+        4       { 'EncryptionPaused' }
+        5       { 'DecryptionPaused' }
+        default { [string]$Status }
+    }
+}
+
+# Bulletproof status read straight from the underlying WMI/CIM class, filtered by drive
+# letter — no path-resolving cmdlet anywhere in the call. This is the self-heal path for
+# the SYSTEM scheduled-task host, where Get-BitLockerVolume can throw "Relative paths are
+# not supported." from its internal `Get-Volume -FilePath $MountPoint` and would otherwise
+# wedge the state machine forever (drive finishes converting, worker never observes it).
+function Get-BLCipherStatusFromCim {
     param([string]$MountPoint = 'C:')
-    $v = Get-BitLockerVolume -MountPoint $MountPoint
+    $driveLetter = $MountPoint.TrimEnd('\')
+    if (-not $driveLetter.EndsWith(':')) { $driveLetter = $driveLetter + ':' }
+
+    $ev = Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftVolumeEncryption' `
+        -ClassName 'Win32_EncryptableVolume' -Filter "DriveLetter='$driveLetter'" -ErrorAction Stop
+    if (-not $ev) { throw "No Win32_EncryptableVolume for drive '$driveLetter'." }
+
+    $method  = (Invoke-CimMethod -InputObject $ev -MethodName 'GetEncryptionMethod').EncryptionMethod
+    $conv    = Invoke-CimMethod -InputObject $ev -MethodName 'GetConversionStatus'
+    $kpIds   = (Invoke-CimMethod -InputObject $ev -MethodName 'GetKeyProtectors' -Arguments @{ KeyProtectorType = [uint32]0 }).VolumeKeyProtectorID
+
+    $protectors = @(
+        foreach ($id in $kpIds) {
+            $typeNum = 0
+            try { $typeNum = [int](Invoke-CimMethod -InputObject $ev -MethodName 'GetKeyProtectorType' -Arguments @{ VolumeKeyProtectorID = $id }).KeyProtectorType } catch { }
+            $recovery = ''
+            if ($typeNum -eq 3) {
+                # Recovery-password string is needed for escrow hashing/verification.
+                try {
+                    $np = Invoke-CimMethod -InputObject $ev -MethodName 'GetKeyProtectorNumericalPassword' -Arguments @{ VolumeKeyProtectorID = $id }
+                    if ($np.ReturnValue -eq 0) { $recovery = [string]$np.NumericalPassword }
+                }
+                catch { }
+            }
+            [pscustomobject]@{
+                KeyProtectorId   = $id
+                KeyProtectorType = (Convert-BLKeyProtectorTypeName -Type $typeNum)
+                RecoveryPassword = $recovery
+            }
+        }
+    )
+
     [pscustomobject]@{
         MountPoint           = $MountPoint
-        Method               = [string]$v.EncryptionMethod
-        VolumeStatus         = [string]$v.VolumeStatus
-        ProtectionStatus     = [string]$v.ProtectionStatus
-        EncryptionPercentage = [int]$v.EncryptionPercentage
-        KeyProtector         = $v.KeyProtector
+        Method               = [string]$method
+        VolumeStatus         = (Convert-BLConversionStatusName -Status ([int]$conv.ConversionStatus))
+        ProtectionStatus     = [string]$ev.ProtectionStatus
+        EncryptionPercentage = [int]$conv.EncryptionPercentage
+        KeyProtector         = $protectors
+    }
+}
+
+function Get-BLCipherStatus {
+    param([string]$MountPoint = 'C:')
+    try {
+        $v = Get-BitLockerVolume -MountPoint $MountPoint -ErrorAction Stop
+        return [pscustomobject]@{
+            MountPoint           = $MountPoint
+            Method               = [string]$v.EncryptionMethod
+            VolumeStatus         = [string]$v.VolumeStatus
+            ProtectionStatus     = [string]$v.ProtectionStatus
+            EncryptionPercentage = [int]$v.EncryptionPercentage
+            KeyProtector         = $v.KeyProtector
+        }
+    }
+    catch {
+        # Get-BitLockerVolume failed (classically the SYSTEM-host "Relative paths are not
+        # supported." from its internal Get-Volume -FilePath). Fall back to the raw CIM
+        # read so a status poll never wedges the state machine. If the fallback also
+        # throws, let it propagate — the worker logs it and retries next poll.
+        Write-CipherLog -Message "Get-BitLockerVolume failed ($($_.Exception.Message)); falling back to CIM status read."
+        return Get-BLCipherStatusFromCim -MountPoint $MountPoint
     }
 }
 
@@ -163,16 +265,25 @@ function Get-BLFreeSpaceGb {
 
 function Get-BLTpmState {
     # Returns 'Ready' | 'NotReady' | 'Absent'.
-    # Get-Tpm can fail with 0x80284005 ("output buffer too small") on some virtual
-    # TPMs even when the TPM is present and ready, so query the Win32_Tpm WMI class
-    # first and fall back to Get-Tpm. An ambiguous/erroring query returns 'NotReady'
-    # (a transient state the guardrail waits on) rather than 'Absent', so a flaky TPM
-    # query never permanently aborts a device that actually has a TPM.
+    # 'Ready' means the TPM is usable BY BITLOCKER, which is STRICTER than enabled+activated:
+    # a TPM can report enabled/activated/owned yet IsReady()=False (e.g. a Parallels vTPM
+    # after a decrypt, or one in a transient failure state), and BitLocker then refuses to
+    # arm a TPM protector with 0x80310018. So gate on the CIM IsReady() method — otherwise
+    # the guardrail waves through a device that cannot actually complete encryption and the
+    # worker tight-loops on failing Enable-BitLocker/manage-bde -on calls.
+    # Get-Tpm can fail with 0x80284005 / 0x80280095 on virtual TPMs even when present, so
+    # query the Win32_Tpm WMI class first and fall back to Get-Tpm. An ambiguous/erroring
+    # query returns 'NotReady' (a state the guardrail waits on) rather than 'Absent', so a
+    # flaky query never permanently aborts a device that actually has a TPM.
     try {
         $tpm = Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction Stop
         if ($tpm) {
-            if ($tpm.IsEnabled_InitialValue -and $tpm.IsActivated_InitialValue) { return 'Ready' }
-            return 'NotReady'
+            if (-not ($tpm.IsEnabled_InitialValue -and $tpm.IsActivated_InitialValue)) { return 'NotReady' }
+            try {
+                if ((Invoke-CimMethod -InputObject $tpm -MethodName 'IsReady' -ErrorAction Stop).IsReady) { return 'Ready' }
+                return 'NotReady'
+            }
+            catch { return 'NotReady' }   # IsReady() unavailable/erroring => wait, don't charge in
         }
     }
     catch { }
@@ -296,7 +407,7 @@ function Get-BLRecoveryProtectors {
     param([Parameter(Mandatory)]$KeyProtector)
     @(
         $KeyProtector | Where-Object {
-            $_.KeyProtectorType -eq 'RecoveryPassword' -and
+            ([string]$_.KeyProtectorType -in @('RecoveryPassword', '3')) -and
             -not [string]::IsNullOrWhiteSpace($_.KeyProtectorId) -and
             -not [string]::IsNullOrWhiteSpace($_.RecoveryPassword)
         }
@@ -372,7 +483,12 @@ function Backup-BLRecoveryProtectorToAad {
     foreach ($p in $Protectors) {
         Write-CipherLog -Message "ACTION BackupToAAD-BitLockerKeyProtector $MountPoint $($p.KeyProtectorId) ..."
         try {
-            BackupToAAD-BitLockerKeyProtector -MountPoint $MountPoint -KeyProtectorId $p.KeyProtectorId -ErrorAction Stop
+            # Out-Null is REQUIRED: BackupToAAD-BitLockerKeyProtector emits a BitLockerVolume
+            # object. Unsuppressed, it leaks up through Invoke-CipherRemediationStep into the
+            # $state the worker captures, so Write-CipherState persists a 2-element array
+            # (stray volume object + real state). That array then makes Set-CipherPhase throw
+            # ("cannot set 'Phase' on an array") and wedges the state machine.
+            BackupToAAD-BitLockerKeyProtector -MountPoint $MountPoint -KeyProtectorId $p.KeyProtectorId -ErrorAction Stop | Out-Null
             Write-CipherLog -Message "ACTION OK: BackupToAAD $($p.KeyProtectorId)"
         }
         catch {
@@ -476,6 +592,18 @@ function Invoke-CipherRemediationStep {
         }
         'Encrypt' {
             if (Test-BLIsFullyDecrypted -Status $status) {
+                # Starting the XtsAes256 conversion arms a TPM protector, which needs a
+                # BitLocker-ready TPM. If it isn't ready (classically a vTPM in a transient
+                # failure state that a reboot clears), do NOT fire Enable-BitLocker /
+                # manage-bde -on every poll — they fail 0x80310018 and churn, and the
+                # 'Started encryption' message would lie. Wait for a ready TPM, aging out so
+                # a permanently-dead TPM surfaces as Aborted instead of looping forever.
+                if ((Get-BLTpmState) -ne 'Ready') {
+                    if ((Get-CipherStateAgeDays -State $State -NowUtc $NowUtc) -ge $MaxAgeDays) {
+                        return Set-CipherPhase -State $State -Phase 'Aborted' -Message "TPM not BitLocker-ready after $MaxAgeDays days; cannot start encryption (a reboot often clears a stuck vTPM)" -AbortReason 'TPM not ready for BitLocker' -NowUtc $NowUtc
+                    }
+                    return Set-CipherPhase -State $State -Phase 'Encrypt' -Message 'Waiting for a BitLocker-ready TPM before starting encryption' -NowUtc $NowUtc
+                }
                 # Drive is decrypted (0%) — START the XtsAes256 conversion. Do NOT gate on
                 # $status.Method: a policy-managed drive reports Method=XtsAes256 even while
                 # fully decrypted, which previously skipped Enable-BitLocker entirely and
@@ -503,14 +631,30 @@ function Invoke-CipherRemediationStep {
                 # encryption that isn't running.
                 return Set-CipherPhase -State $State -Phase 'Encrypt' -Message 'Drive is decrypted; restarting encryption' -NowUtc $NowUtc
             }
-            if (-not (Test-AllRecoveryProtectorsBackedUp -Protectors $recovery -MountPoint $mount)) {
+            $backedUp = Test-AllRecoveryProtectorsBackedUp -Protectors $recovery -MountPoint $mount
+            if (-not $backedUp) {
                 Backup-BLRecoveryProtectorToAad -Protectors $recovery -MountPoint $mount -NowUtc $NowUtc
+                # Re-check after the attempt so a success THIS cycle completes immediately.
+                $backedUp = Test-AllRecoveryProtectorsBackedUp -Protectors $recovery -MountPoint $mount
             }
-            if ((Test-BLIsXtsAes256 -Status $status) -and (Test-BLIsFullyEncrypted -Status $status) -and (Test-BLIsProtectionOn -Status $status)) {
+            $cipherOk = (Test-BLIsXtsAes256 -Status $status) -and (Test-BLIsFullyEncrypted -Status $status) -and (Test-BLIsProtectionOn -Status $status)
+            if ($cipherOk -and $backedUp) {
                 Unregister-CipherScheduledTask
                 return Set-CipherPhase -State $State -Phase 'Done' -Message 'Device fully XtsAes256 compliant; recovery key escrowed' -NowUtc $NowUtc
             }
-            return Set-CipherPhase -State $State -Phase 'BackupKey' -Message "Key escrowed; waiting for full encryption ($($status.EncryptionPercentage)%)" -NowUtc $NowUtc
+            if ($cipherOk -and -not $backedUp) {
+                # Cipher target is met, but the recovery key is NOT confirmed in Entra.
+                # Escrowing the key is the whole point of this remediation, so NEVER finish
+                # or self-delete the task on a failed/pending escrow (classically a transient
+                # DNS/AAD blip such as 0x80072F9A). Keep retrying every poll; age out to
+                # Aborted only after MaxAgeDays so a device that can never reach Entra does
+                # not retry forever (and its failure becomes visible instead of silent).
+                if ((Get-CipherStateAgeDays -State $State -NowUtc $NowUtc) -ge $MaxAgeDays) {
+                    return Set-CipherPhase -State $State -Phase 'Aborted' -Message "Encryption complete but recovery-key escrow to Entra did not succeed within $MaxAgeDays days" -AbortReason 'AAD recovery-key escrow failed' -NowUtc $NowUtc
+                }
+                return Set-CipherPhase -State $State -Phase 'BackupKey' -Message 'Encrypted and protected; retrying recovery-key escrow to Entra' -NowUtc $NowUtc
+            }
+            return Set-CipherPhase -State $State -Phase 'BackupKey' -Message "Waiting for full encryption ($($status.EncryptionPercentage)%)" -NowUtc $NowUtc
         }
         'Done'    { return $State }
         'Aborted' { return $State }
