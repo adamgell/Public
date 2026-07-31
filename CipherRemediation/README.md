@@ -73,6 +73,13 @@ IntuneWinAppUtil.exe -c .\Win32 -s Install-CipherRemediation.ps1 -o <output>
   (this is the Win32 app's own detection — distinct from the Phase 1 Proactive
   Remediation script — and reports "installed" only when the drive is fully
   XtsAes256, encrypted, and the key is escrowed)
+- **Requirement rule (recommended):** custom requirement **script** =
+  `Win32/Requirements-CipherRemediation.ps1`, run as **System**, 64-bit, signature
+  check No, rule: **string** output **equals** `Applicable`. Gates the app to OS
+  drives that actually need the upgrade — encrypted with a non-XtsAes256 cipher
+  (128-bit / CBC / legacy), or XtsAes256 with **Used-Space-Only** conversion.
+  Already-compliant, unencrypted, and hardware-SED devices report "Not
+  applicable" and never install the worker.
 - **Run as 32-bit:** No (BitLocker cmdlets require 64-bit; the scripts also
   self-relaunch via `sysnative` as a safety net)
 - **Assignment:** the remediation device group from Phase 1
